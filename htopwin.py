@@ -680,13 +680,12 @@ class CpuBarsPanel(Widget):
     DEFAULT_CSS = """
     CpuBarsPanel {
         height: auto;
-        width: auto;
+        width: 1fr;
         padding: 0;
     }
     .cpu-col {
         height: auto;
-        width: auto;
-        padding-right: 2;
+        width: 1fr;
     }
     """
 
@@ -717,6 +716,7 @@ class MemBarsPanel(Widget):
     DEFAULT_CSS = """
     MemBarsPanel {
         height: auto;
+        width: 1fr;
         padding: 0;
     }
     """
@@ -1174,17 +1174,6 @@ def collect_processes() -> list[dict]:
     return procs
 
 
-def _collect_local_data():
-    """Collect all local system data in one call (runs in a background thread)."""
-    procs = collect_processes()
-    per_cpu = psutil.cpu_percent(percpu=True)
-    if isinstance(per_cpu, float):
-        per_cpu = [per_cpu]
-    mem = psutil.virtual_memory()
-    swap = psutil.swap_memory()
-    return procs, per_cpu, mem, swap
-
-
 # ─────────────────────────────────────────────────────────
 #  Main App
 # ─────────────────────────────────────────────────────────
@@ -1264,6 +1253,7 @@ class HTopWin(App):
         self._remote_info = None      # Last RemoteSystemInfo
         self._server_store = None     # ServerStore instance (loaded lazily)
         self._displayed_pids: list[str] = []  # tracks current table row order
+        self._last_cpu_percents: list[float] = []  # last cpu_percent snapshot
 
     # ── Layout ──────────────────────────────────────────
 
@@ -1308,43 +1298,42 @@ class HTopWin(App):
     # ── Refresh ──────────────────────────────────────────
 
     def _do_refresh(self) -> None:
-        """Kick off a background worker to collect data without blocking the UI."""
-        self.run_worker(self._async_refresh, exclusive=True, thread=False)
+        """Sample cpu_percent on the main thread (non-blocking, needs stable
+        thread-local baseline), then hand the slow process iteration to a
+        background worker so the UI stays responsive."""
+        per_cpu = psutil.cpu_percent(percpu=True, interval=None)
+        self._last_cpu_percents = per_cpu if isinstance(per_cpu, list) else [per_cpu]
+        self.run_worker(self._async_refresh, exclusive=True)
 
     async def _async_refresh(self) -> None:
-        """Collect all data off the main thread, then update widgets."""
-        if self._remote_monitor and self._remote_monitor.connected:
-            # ── Remote path ──────────────────────────────────────────────
-            try:
+        """Worker: run slow I/O off the event loop then update widgets."""
+        try:
+            if self._remote_monitor and self._remote_monitor.connected:
                 info = await asyncio.to_thread(self._remote_monitor.collect)
-            except Exception as exc:
-                self.notify(f"Remote collect error: {exc}", severity="error")
-                self._remote_monitor = None
-                await self._collect_and_update_local()
-                return
+                if info.error:
+                    self.notify(f"Remote error: {info.error}", severity="error")
+                    self._remote_monitor = None
+                    # fall through to local below
+                else:
+                    self._remote_info = info
+                    self._update_top_panel_remote(info)
+                    self._update_sysinfo_remote(info)
+                    self._processes = info.processes
+                    self._update_table()
+                    self._update_status_bar()
+                    return
 
-            self._remote_info = info
-            if info.error:
-                self.notify(f"Remote error: {info.error}", severity="error")
-                self._remote_monitor = None
-                await self._collect_and_update_local()
-            else:
-                self._update_top_panel_remote(info)
-                self._update_sysinfo_remote(info)
-                self._processes = info.processes
-                self._update_table()
-                self._update_status_bar()
-        else:
-            await self._collect_and_update_local()
-
-    async def _collect_and_update_local(self) -> None:
-        """Collect local system data in a thread, then update all widgets."""
-        procs, per_cpu, mem, swap = await asyncio.to_thread(_collect_local_data)
-        self._processes = procs
-        self._update_top_panel_with(per_cpu, mem, swap)
-        self._update_sysinfo()
-        self._update_table()
-        self._update_status_bar()
+            # ── Local path ───────────────────────────────────────────────
+            procs = await asyncio.to_thread(collect_processes)
+            mem  = psutil.virtual_memory()
+            swap = psutil.swap_memory()
+            self._processes = procs
+            self._update_top_panel_with(self._last_cpu_percents, mem, swap)
+            self._update_sysinfo()
+            self._update_table()
+            self._update_status_bar()
+        except Exception as exc:
+            self.notify(f"Refresh error: {exc}", severity="error")
 
     def _update_top_panel_with(self, per_cpu: list[float], mem, swap) -> None:
         try:
