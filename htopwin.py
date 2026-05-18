@@ -1,0 +1,1108 @@
+"""
+HTopWin - htop for Windows
+A terminal-based process manager for Windows built with Textual and psutil.
+"""
+
+from __future__ import annotations
+
+import platform
+import signal
+import sys
+from datetime import timedelta
+from typing import ClassVar
+
+import psutil
+from textual import on
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Container, Horizontal
+from textual.css.query import NoMatches
+from textual.reactive import reactive
+from textual.screen import ModalScreen
+from textual.widget import Widget
+from textual.widgets import (
+    Button,
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    Static,
+)
+
+IS_WINDOWS = platform.system() == "Windows"
+
+# ─────────────────────────────────────────────────────────
+#  Inline CSS
+# ─────────────────────────────────────────────────────────
+APP_CSS = """
+/* ── Base ── */
+Screen {
+    background: #1a1a2e;
+    color: #e0e0e0;
+}
+
+/* ── Top panel ── */
+#top-panel {
+    height: auto;
+    background: #16213e;
+    padding: 0 1;
+    border-bottom: solid #0f3460;
+}
+
+#cpu-section {
+    height: auto;
+    padding: 0;
+}
+
+#mem-section {
+    height: auto;
+    padding: 0;
+}
+
+.section-title {
+    color: #00d4ff;
+    text-style: bold;
+    width: auto;
+    padding: 0 1 0 0;
+}
+
+.bar-row {
+    height: 1;
+    layout: horizontal;
+}
+
+.bar-label {
+    width: 8;
+    color: #a0a0c0;
+    text-align: right;
+    padding-right: 1;
+}
+
+.bar-container {
+    width: 1fr;
+    height: 1;
+}
+
+.bar-value {
+    width: 7;
+    color: #c0c0e0;
+    text-align: right;
+    padding-left: 1;
+}
+
+/* ── System info strip ── */
+#sysinfo-bar {
+    height: 1;
+    background: #0f3460;
+    padding: 0 2;
+    color: #a0c0ff;
+    layout: horizontal;
+}
+
+.sysinfo-item {
+    width: auto;
+    padding: 0 2;
+    color: #a0c0ff;
+}
+
+.sysinfo-sep {
+    color: #304060;
+    width: 1;
+}
+
+/* ── Toolbar ── */
+#toolbar {
+    height: 1;
+    background: #16213e;
+    padding: 0 1;
+    layout: horizontal;
+}
+
+#search-input {
+    width: 30;
+    height: 1;
+    background: #0d1b2a;
+    color: #e0e0e0;
+    border: none;
+    padding: 0 1;
+    display: none;
+}
+
+#search-input:focus {
+    border: none;
+    background: #1a2a3a;
+}
+
+#search-input.visible {
+    display: block;
+}
+
+.toolbar-label {
+    color: #6080a0;
+    width: auto;
+    padding: 0 1;
+}
+
+.sort-indicator {
+    color: #00d4ff;
+    width: auto;
+    padding: 0 1;
+}
+
+/* ── Process table ── */
+#process-scroll {
+    height: 1fr;
+    background: #1a1a2e;
+}
+
+#process-table {
+    height: auto;
+    background: #1a1a2e;
+}
+
+DataTable {
+    background: #1a1a2e;
+    color: #d0d0e0;
+    height: 1fr;
+}
+
+DataTable > .datatable--header {
+    background: #0f3460;
+    color: #00d4ff;
+    text-style: bold;
+}
+
+DataTable > .datatable--header-hover {
+    background: #1a4a80;
+    color: #40e0ff;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #1a4080;
+    color: #ffffff;
+}
+
+DataTable > .datatable--hover {
+    background: #1e2a4a;
+    color: #e0e8ff;
+}
+
+DataTable > .datatable--odd-row {
+    background: #1e1e32;
+}
+
+DataTable > .datatable--even-row {
+    background: #1a1a2e;
+}
+
+/* ── Status bar ── */
+#status-bar {
+    height: 1;
+    background: #0f3460;
+    padding: 0 2;
+    layout: horizontal;
+    color: #a0c0ff;
+}
+
+.status-item {
+    width: auto;
+    padding: 0 2;
+}
+
+.status-key {
+    color: #00d4ff;
+    text-style: bold;
+}
+
+.status-val {
+    color: #e0e0e0;
+}
+
+/* ── Modal screens ── */
+ModalScreen {
+    background: rgba(0, 0, 0, 0.8);
+    align: center middle;
+}
+
+#kill-dialog {
+    width: 50;
+    height: auto;
+    background: #16213e;
+    border: solid #0f3460;
+    padding: 1 2;
+}
+
+#kill-dialog Label {
+    text-align: center;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#kill-dialog .dialog-title {
+    color: #ff4444;
+    text-style: bold;
+    text-align: center;
+    width: 100%;
+}
+
+#kill-dialog .dialog-info {
+    color: #a0c0ff;
+    text-align: center;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#kill-buttons {
+    layout: horizontal;
+    align: center middle;
+    height: auto;
+    margin-top: 1;
+}
+
+#kill-buttons Button {
+    margin: 0 1;
+}
+
+Button.danger {
+    background: #8b0000;
+    color: #ffcccc;
+    border: solid #cc0000;
+}
+
+Button.danger:hover {
+    background: #cc0000;
+}
+
+Button.safe {
+    background: #1a3a1a;
+    color: #ccffcc;
+    border: solid #336633;
+}
+
+Button.safe:hover {
+    background: #336633;
+}
+
+/* ── Signal menu ── */
+#signal-dialog {
+    width: 40;
+    height: auto;
+    max-height: 30;
+    background: #16213e;
+    border: solid #0f3460;
+    padding: 1 2;
+}
+
+#signal-dialog .dialog-title {
+    color: #ffaa00;
+    text-style: bold;
+    text-align: center;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#signal-list {
+    height: auto;
+    max-height: 20;
+    background: #0d1b2a;
+    border: solid #1a3a5a;
+}
+
+ListItem {
+    padding: 0 1;
+    color: #c0d0e0;
+}
+
+ListItem:hover {
+    background: #1a4080;
+    color: #ffffff;
+}
+
+ListView:focus > ListItem.--highlight {
+    background: #1a4080;
+    color: #ffffff;
+}
+
+/* ── Sort menu ── */
+#sort-dialog {
+    width: 35;
+    height: auto;
+    background: #16213e;
+    border: solid #0f3460;
+    padding: 1 2;
+}
+
+#sort-dialog .dialog-title {
+    color: #00d4ff;
+    text-style: bold;
+    text-align: center;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+/* ── Footer override ── */
+Footer {
+    background: #0f3460;
+    color: #a0c0ff;
+}
+
+Footer > .footer--key {
+    background: #1a4080;
+    color: #ffffff;
+}
+
+/* ── Scrollbar ── */
+ScrollableContainer > .scrollbar {
+    background: #0f3460;
+}
+
+ScrollableContainer > .scrollbar--slider {
+    background: #304880;
+}
+"""
+
+# ─────────────────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────────────────
+BLOCK_CHARS = " ▏▎▍▌▋▊▉█"
+
+
+def make_bar(pct: float, width: int = 20) -> str:
+    """Return a Unicode block-character progress bar string."""
+    pct = max(0.0, min(100.0, pct))
+    filled_units = pct / 100.0 * width * 8
+    full_blocks = int(filled_units // 8)
+    remainder = int(filled_units % 8)
+    bar = "█" * full_blocks
+    if remainder > 0 and full_blocks < width:
+        bar += BLOCK_CHARS[remainder]
+    bar = bar.ljust(width)
+    return bar
+
+
+def bar_color(pct: float) -> str:
+    """Return a Rich markup color string based on percentage."""
+    if pct < 50:
+        return "#00cc44"
+    elif pct < 80:
+        return "#ffcc00"
+    else:
+        return "#ff3333"
+
+
+def rich_bar(pct: float, width: int = 20) -> str:
+    """Return a Rich markup string for a colored bar."""
+    color = bar_color(pct)
+    bar = make_bar(pct, width)
+    return f"[{color}]{bar}[/{color}]"
+
+
+def format_bytes(n: int) -> str:
+    for unit in ("B", "K", "M", "G", "T"):
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}P"
+
+
+def format_uptime(seconds: float) -> str:
+    td = timedelta(seconds=int(seconds))
+    days = td.days
+    hours, rem = divmod(td.seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+# ─────────────────────────────────────────────────────────
+#  Widgets
+# ─────────────────────────────────────────────────────────
+class BarWidget(Static):
+    """A single labelled progress bar."""
+
+    DEFAULT_CSS = """
+    BarWidget {
+        height: 1;
+        layout: horizontal;
+    }
+    """
+
+    def __init__(self, label: str, pct: float = 0.0, extra: str = "", **kwargs):
+        super().__init__(**kwargs)
+        self._label = label
+        self._pct = pct
+        self._extra = extra
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._label, classes="bar-label")
+        yield Static("", id=f"bar-fill-{self.id}", classes="bar-container")
+        yield Static("", id=f"bar-val-{self.id}", classes="bar-value")
+
+    def on_mount(self) -> None:
+        self._render_bar()
+
+    def update_bar(self, pct: float, extra: str = "") -> None:
+        self._pct = pct
+        self._extra = extra
+        self._render_bar()
+
+    def _render_bar(self) -> None:
+        try:
+            fill_widget = self.query_one(f"#bar-fill-{self.id}", Static)
+            val_widget = self.query_one(f"#bar-val-{self.id}", Static)
+            fill_widget.update(rich_bar(self._pct, width=25))
+            val_widget.update(f"{self._pct:5.1f}%{(' ' + self._extra) if self._extra else ''}")
+        except NoMatches:
+            pass
+
+
+class CpuBarsPanel(Widget):
+    """Panel showing one bar per CPU core."""
+
+    DEFAULT_CSS = """
+    CpuBarsPanel {
+        height: auto;
+        padding: 0;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        cpu_count = psutil.cpu_count(logical=True) or 1
+        yield Static("[bold #00d4ff]  CPU[/bold #00d4ff]", classes="section-title")
+        for i in range(cpu_count):
+            yield BarWidget(
+                label=f" {i+1:>2}",
+                pct=0.0,
+                id=f"cpu-bar-{i}",
+            )
+
+    def refresh_stats(self, per_cpu: list[float]) -> None:
+        for i, pct in enumerate(per_cpu):
+            try:
+                bar = self.query_one(f"#cpu-bar-{i}", BarWidget)
+                bar.update_bar(pct)
+            except NoMatches:
+                pass
+
+
+class MemBarsPanel(Widget):
+    """Panel showing memory and swap bars."""
+
+    DEFAULT_CSS = """
+    MemBarsPanel {
+        height: auto;
+        padding: 0;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("[bold #00d4ff]  MEM[/bold #00d4ff]", classes="section-title")
+        yield BarWidget(label="  Mem", pct=0.0, id="mem-bar")
+        yield BarWidget(label=" Swp", pct=0.0, id="swp-bar")
+
+    def refresh_stats(self, mem: psutil.svmem, swap: psutil.sswap) -> None:  # type: ignore[name-defined]
+        try:
+            mem_bar = self.query_one("#mem-bar", BarWidget)
+            used_str = format_bytes(mem.used)
+            total_str = format_bytes(mem.total)
+            mem_bar.update_bar(mem.percent, f"{used_str}/{total_str}")
+        except NoMatches:
+            pass
+        try:
+            swp_bar = self.query_one("#swp-bar", BarWidget)
+            if swap.total > 0:
+                used_str = format_bytes(swap.used)
+                total_str = format_bytes(swap.total)
+                swp_bar.update_bar(swap.percent, f"{used_str}/{total_str}")
+            else:
+                swp_bar.update_bar(0.0, "N/A")
+        except NoMatches:
+            pass
+
+
+# ─────────────────────────────────────────────────────────
+#  Modal Screens
+# ─────────────────────────────────────────────────────────
+class KillConfirmScreen(ModalScreen[bool]):
+    """Confirmation dialog before killing a process."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "confirm", "Confirm"),
+    ]
+
+    def __init__(self, pid: int, name: str, **kwargs):
+        super().__init__(**kwargs)
+        self._pid = pid
+        self._name = name
+
+    def compose(self) -> ComposeResult:
+        with Container(id="kill-dialog"):
+            yield Label("[bold red]  KILL PROCESS[/bold red]", classes="dialog-title")
+            yield Label(
+                f"Send SIGKILL to:[/]\n[bold white]{self._name}[/bold white] (PID [yellow]{self._pid}[/yellow])",
+                classes="dialog-info",
+            )
+            with Horizontal(id="kill-buttons"):
+                yield Button("  Kill", id="btn-kill", classes="danger")
+                yield Button("  Cancel", id="btn-cancel", classes="safe")
+
+    @on(Button.Pressed, "#btn-kill")
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#btn-cancel")
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+
+SIGNALS = [
+    (signal.SIGTERM, "SIGTERM (15) - Graceful terminate"),
+    (signal.SIGKILL, "SIGKILL (9)  - Force kill"),
+]
+
+if IS_WINDOWS:
+    # Windows doesn't have all POSIX signals; only expose what works
+    SIGNALS = [
+        (signal.SIGTERM, "SIGTERM (15) - Graceful terminate"),
+        (signal.SIGKILL, "SIGKILL (9)  - Force kill"),
+    ]
+else:
+    SIGNALS = [
+        (signal.SIGHUP,  "SIGHUP  (1)  - Hangup"),
+        (signal.SIGINT,  "SIGINT  (2)  - Interrupt"),
+        (signal.SIGQUIT, "SIGQUIT (3)  - Quit"),
+        (signal.SIGKILL, "SIGKILL (9)  - Force kill"),
+        (signal.SIGTERM, "SIGTERM (15) - Graceful terminate"),
+        (signal.SIGSTOP, "SIGSTOP (19) - Stop"),
+        (signal.SIGCONT, "SIGCONT (18) - Continue"),
+    ]
+
+
+class SignalMenuScreen(ModalScreen[int | None]):
+    """Menu for choosing which signal to send."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, pid: int, name: str, **kwargs):
+        super().__init__(**kwargs)
+        self._pid = pid
+        self._name = name
+
+    def compose(self) -> ComposeResult:
+        with Container(id="signal-dialog"):
+            yield Label(
+                f"[bold yellow]  Send Signal[/bold yellow]\n[dim]{self._name} (PID {self._pid})[/dim]",
+                classes="dialog-title",
+            )
+            items = [ListItem(Label(desc), id=f"sig-{sig.value}") for sig, desc in SIGNALS]
+            yield ListView(*items, id="signal-list")
+
+    @on(ListView.Selected)
+    def signal_selected(self, event: ListView.Selected) -> None:
+        if event.item.id and event.item.id.startswith("sig-"):
+            sig_val = int(event.item.id[4:])
+            self.dismiss(sig_val)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SortMenuScreen(ModalScreen[str | None]):
+    """Menu for choosing sort column."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    COLUMNS = [
+        ("pid", "PID"),
+        ("name", "Name"),
+        ("username", "User"),
+        ("cpu_percent", "CPU%"),
+        ("memory_percent", "MEM%"),
+        ("num_threads", "Threads"),
+        ("status", "Status"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Container(id="sort-dialog"):
+            yield Label("[bold #00d4ff]  Sort By[/bold #00d4ff]", classes="dialog-title")
+            items = [ListItem(Label(f"  {display}"), id=f"sort-{key}") for key, display in self.COLUMNS]
+            yield ListView(*items, id="sort-list")
+
+    @on(ListView.Selected)
+    def sort_selected(self, event: ListView.Selected) -> None:
+        if event.item.id and event.item.id.startswith("sort-"):
+            key = event.item.id[5:]
+            self.dismiss(key)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+# ─────────────────────────────────────────────────────────
+#  Process data collection
+# ─────────────────────────────────────────────────────────
+PROC_ATTRS = [
+    "pid", "name", "username", "cpu_percent", "memory_percent",
+    "num_threads", "status", "cmdline", "create_time",
+]
+if IS_WINDOWS:
+    PROC_ATTRS.append("num_handles")
+
+
+def collect_processes() -> list[dict]:
+    """Collect process info using psutil, handling permission errors gracefully."""
+    procs = []
+    for proc in psutil.process_iter(PROC_ATTRS):
+        try:
+            info = proc.info  # type: ignore[attr-defined]
+            info["cmdline_str"] = " ".join(info.get("cmdline") or []) or info.get("name", "")
+            info["username"] = info.get("username") or "N/A"
+            info["cpu_percent"] = info.get("cpu_percent") or 0.0
+            info["memory_percent"] = info.get("memory_percent") or 0.0
+            info["num_threads"] = info.get("num_threads") or 0
+            if IS_WINDOWS:
+                info["handles"] = info.get("num_handles") or 0
+            procs.append(info)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return procs
+
+
+# ─────────────────────────────────────────────────────────
+#  Main App
+# ─────────────────────────────────────────────────────────
+COLUMNS = [
+    ("pid",             "PID",      6,  False),
+    ("name",            "Name",     20, False),
+    ("username",        "User",     14, False),
+    ("cpu_percent",     "CPU%",     7,  True),
+    ("memory_percent",  "MEM%",     7,  True),
+    ("num_threads",     "Threads",  7,  True),
+    ("status",          "Status",   10, False),
+    ("cmdline_str",     "Command",  0,  False),  # 0 = expand
+]
+
+STATUS_COLORS = {
+    "running":  "#00ff88",
+    "sleeping": "#6080b0",
+    "disk-sleep": "#8060b0",
+    "stopped":  "#ffaa00",
+    "zombie":   "#ff4444",
+    "dead":     "#884444",
+    "idle":     "#608060",
+}
+
+
+def colorize_status(status: str) -> str:
+    color = STATUS_COLORS.get(status.lower(), "#a0a0c0")
+    return f"[{color}]{status}[/{color}]"
+
+
+def colorize_cpu(pct: float) -> str:
+    color = bar_color(pct)
+    return f"[{color}]{pct:6.2f}[/{color}]"
+
+
+def colorize_mem(pct: float) -> str:
+    color = bar_color(pct)
+    return f"[{color}]{pct:6.2f}[/{color}]"
+
+
+class HTopWin(App):
+    """htop for Windows — a terminal process manager."""
+
+    TITLE = "HTopWin"
+    CSS = APP_CSS
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("q", "quit", "Quit", show=True),
+        Binding("f10", "quit", "Quit", show=False),
+        Binding("k", "kill_process", "Kill", show=True),
+        Binding("f9", "signal_menu", "Signal", show=True),
+        Binding("f5", "refresh_now", "Refresh", show=True),
+        Binding("f6", "sort_menu", "Sort", show=True),
+        Binding("f3", "toggle_search", "Search", show=True),
+        Binding("/", "toggle_search", "Search", show=False),
+        Binding("escape", "clear_search", "Clear", show=False),
+        Binding("up", "cursor_up", "Up", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
+    ]
+
+    # Reactive state
+    sort_key: reactive[str] = reactive("cpu_percent")
+    sort_reverse: reactive[bool] = reactive(True)
+    filter_text: reactive[str] = reactive("")
+    search_visible: reactive[bool] = reactive(False)
+
+    def __init__(self):
+        super().__init__()
+        self._processes: list[dict] = []
+        self._selected_pid: int | None = None
+        self._refresh_timer = None
+        self._col_keys: list[str] = []
+
+    # ── Layout ──────────────────────────────────────────
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+
+        with Container(id="top-panel"):
+            with Horizontal():
+                yield CpuBarsPanel(id="cpu-panel")
+                yield MemBarsPanel(id="mem-panel")
+
+        yield Static("", id="sysinfo-bar")
+
+        with Horizontal(id="toolbar"):
+            yield Static(" Filter: ", classes="toolbar-label")
+            yield Input(placeholder="type to filter...", id="search-input")
+            yield Static("", id="sort-label", classes="sort-indicator")
+
+        yield DataTable(id="process-table", cursor_type="row", zebra_stripes=True)
+
+        yield Static("", id="status-bar")
+        yield Footer()
+
+    # ── Mount ────────────────────────────────────────────
+
+    def on_mount(self) -> None:
+        self._setup_table()
+        self._do_refresh()
+        self._refresh_timer = self.set_interval(2.0, self._do_refresh)
+
+    def _setup_table(self) -> None:
+        table: DataTable = self.query_one("#process-table", DataTable)
+        table.clear(columns=True)
+        self._col_keys = []
+        for key, label, width, _ in COLUMNS:
+            if width == 0:
+                col_key = table.add_column(label, key=key)
+            else:
+                col_key = table.add_column(label, width=width, key=key)
+            self._col_keys.append(key)
+
+    # ── Refresh ──────────────────────────────────────────
+
+    def _do_refresh(self) -> None:
+        """Collect data and update all widgets."""
+        self._processes = collect_processes()
+        self._update_top_panel()
+        self._update_sysinfo()
+        self._update_table()
+        self._update_status_bar()
+
+    def _update_top_panel(self) -> None:
+        per_cpu = psutil.cpu_percent(percpu=True)
+        if isinstance(per_cpu, float):
+            per_cpu = [per_cpu]
+
+        try:
+            cpu_panel = self.query_one("#cpu-panel", CpuBarsPanel)
+            cpu_panel.refresh_stats(per_cpu)
+        except NoMatches:
+            pass
+
+        mem = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        try:
+            mem_panel = self.query_one("#mem-panel", MemBarsPanel)
+            mem_panel.refresh_stats(mem, swap)
+        except NoMatches:
+            pass
+
+    def _update_sysinfo(self) -> None:
+        try:
+            boot_time = psutil.boot_time()
+            import time
+            uptime = time.time() - boot_time
+            uptime_str = format_uptime(uptime)
+        except Exception:
+            uptime_str = "N/A"
+
+        try:
+            freq = psutil.cpu_freq()
+            freq_str = f"{freq.current:.0f} MHz" if freq else "N/A"
+        except Exception:
+            freq_str = "N/A"
+
+        cpu_count_logical = psutil.cpu_count(logical=True) or 0
+        cpu_count_physical = psutil.cpu_count(logical=False) or 0
+
+        load_str = "N/A"
+        if not IS_WINDOWS:
+            try:
+                loads = psutil.getloadavg()
+                load_str = f"{loads[0]:.2f} {loads[1]:.2f} {loads[2]:.2f}"
+            except Exception:
+                pass
+
+        parts = [
+            f"[bold #00d4ff]Uptime:[/bold #00d4ff] [white]{uptime_str}[/white]",
+            f"[bold #00d4ff]CPU:[/bold #00d4ff] [white]{cpu_count_physical}C/{cpu_count_logical}T[/white]",
+            f"[bold #00d4ff]Freq:[/bold #00d4ff] [white]{freq_str}[/white]",
+        ]
+        if not IS_WINDOWS:
+            parts.append(f"[bold #00d4ff]Load:[/bold #00d4ff] [white]{load_str}[/white]")
+
+        try:
+            sysinfo = self.query_one("#sysinfo-bar", Static)
+            sysinfo.update("   " + "  |  ".join(parts))
+        except NoMatches:
+            pass
+
+    def _update_table(self) -> None:
+        table: DataTable = self.query_one("#process-table", DataTable)
+
+        # Sort
+        try:
+            procs = sorted(
+                self._processes,
+                key=lambda p: (p.get(self.sort_key) or 0) if isinstance(p.get(self.sort_key), (int, float))
+                else str(p.get(self.sort_key) or "").lower(),
+                reverse=self.sort_reverse,
+            )
+        except Exception:
+            procs = self._processes
+
+        # Filter
+        ft = self.filter_text.lower()
+        if ft:
+            procs = [
+                p for p in procs
+                if ft in str(p.get("name", "")).lower()
+                or ft in str(p.get("username", "")).lower()
+                or ft in str(p.get("cmdline_str", "")).lower()
+                or ft in str(p.get("pid", ""))
+            ]
+
+        # Remember cursor position
+        try:
+            cursor_row = table.cursor_row
+        except Exception:
+            cursor_row = 0
+
+        table.clear()
+
+        for proc in procs:
+            pid = proc.get("pid", 0)
+            name = str(proc.get("name", ""))[:20]
+            user = str(proc.get("username", "N/A"))[:14]
+            cpu = proc.get("cpu_percent", 0.0)
+            mem = proc.get("memory_percent", 0.0)
+            threads = str(proc.get("num_threads", 0))
+            status = str(proc.get("status", ""))
+            cmd = str(proc.get("cmdline_str", ""))[:120]
+
+            row = (
+                str(pid),
+                name,
+                user,
+                colorize_cpu(cpu),
+                colorize_mem(mem),
+                threads,
+                colorize_status(status),
+                cmd,
+            )
+            table.add_row(*row, key=str(pid))
+
+        # Restore cursor
+        row_count = table.row_count
+        if row_count > 0:
+            safe_row = min(cursor_row, row_count - 1)
+            try:
+                table.move_cursor(row=safe_row)
+            except Exception:
+                pass
+
+        # Update sort label
+        sort_dir = "▼" if self.sort_reverse else "▲"
+        col_display = next((label for key, label, *_ in COLUMNS if key == self.sort_key), self.sort_key)
+        try:
+            sort_label = self.query_one("#sort-label", Static)
+            sort_label.update(f"[#00d4ff]Sort:[/#00d4ff] [white]{col_display} {sort_dir}[/white]")
+        except NoMatches:
+            pass
+
+    def _update_status_bar(self) -> None:
+        total = len(self._processes)
+        running = sum(1 for p in self._processes if p.get("status") == "running")
+        sleeping = sum(1 for p in self._processes if p.get("status") in ("sleeping", "idle"))
+        zombie = sum(1 for p in self._processes if p.get("status") == "zombie")
+
+        ft = self.filter_text
+        filter_info = f"  [bold #ffaa00]Filter:[/bold #ffaa00] [white]{ft}[/white]" if ft else ""
+
+        msg = (
+            f"  [bold #00d4ff]Tasks:[/bold #00d4ff] [white]{total}[/white]"
+            f"  [bold #00ff88]Running:[/bold #00ff88] [white]{running}[/white]"
+            f"  [bold #6080b0]Sleeping:[/bold #6080b0] [white]{sleeping}[/white]"
+        )
+        if zombie:
+            msg += f"  [bold #ff4444]Zombie:[/bold #ff4444] [white]{zombie}[/white]"
+        msg += filter_info
+
+        try:
+            bar = self.query_one("#status-bar", Static)
+            bar.update(msg)
+        except NoMatches:
+            pass
+
+    # ── Actions ──────────────────────────────────────────
+
+    def action_refresh_now(self) -> None:
+        self._do_refresh()
+
+    def action_quit(self) -> None:
+        self.exit()
+
+    def _get_selected_proc_info(self) -> tuple[int, str] | None:
+        """Return (pid, name) of the currently selected row, or None."""
+        table: DataTable = self.query_one("#process-table", DataTable)
+        try:
+            row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+            pid = int(row_key.value)  # type: ignore[arg-type]
+            # Find name
+            name = next(
+                (str(p.get("name", "")) for p in self._processes if p.get("pid") == pid),
+                "Unknown",
+            )
+            return pid, name
+        except Exception:
+            return None
+
+    def action_kill_process(self) -> None:
+        info = self._get_selected_proc_info()
+        if info is None:
+            self.notify("No process selected.", severity="warning")
+            return
+        pid, name = info
+
+        def handle_result(confirmed: bool | None) -> None:
+            if confirmed:
+                self._send_signal_to_pid(pid, signal.SIGKILL)
+
+        self.push_screen(KillConfirmScreen(pid, name), handle_result)
+
+    def action_signal_menu(self) -> None:
+        info = self._get_selected_proc_info()
+        if info is None:
+            self.notify("No process selected.", severity="warning")
+            return
+        pid, name = info
+
+        def handle_result(sig_val: int | None) -> None:
+            if sig_val is not None:
+                self._send_signal_to_pid(pid, sig_val)
+
+        self.push_screen(SignalMenuScreen(pid, name), handle_result)
+
+    def action_sort_menu(self) -> None:
+        def handle_result(key: str | None) -> None:
+            if key:
+                if self.sort_key == key:
+                    self.sort_reverse = not self.sort_reverse
+                else:
+                    self.sort_key = key
+                    self.sort_reverse = True
+                self._update_table()
+
+        self.push_screen(SortMenuScreen(), handle_result)
+
+    def action_toggle_search(self) -> None:
+        self.search_visible = not self.search_visible
+        search_input = self.query_one("#search-input", Input)
+        if self.search_visible:
+            search_input.add_class("visible")
+            search_input.focus()
+        else:
+            search_input.remove_class("visible")
+            self.filter_text = ""
+            search_input.value = ""
+            self._update_table()
+            self._update_status_bar()
+            self.query_one("#process-table", DataTable).focus()
+
+    def action_clear_search(self) -> None:
+        if self.search_visible:
+            self.action_toggle_search()
+
+    def action_cursor_up(self) -> None:
+        table = self.query_one("#process-table", DataTable)
+        table.focus()
+        table.action_scroll_up()
+
+    def action_cursor_down(self) -> None:
+        table = self.query_one("#process-table", DataTable)
+        table.focus()
+        table.action_scroll_down()
+
+    def _send_signal_to_pid(self, pid: int, sig: int) -> None:
+        try:
+            proc = psutil.Process(pid)
+            if IS_WINDOWS:
+                if sig == signal.SIGKILL or sig == 9:
+                    proc.kill()
+                else:
+                    proc.terminate()
+            else:
+                proc.send_signal(sig)
+            self.notify(f"Signal {sig} sent to PID {pid}.", severity="information")
+            self._do_refresh()
+        except psutil.NoSuchProcess:
+            self.notify(f"PID {pid} no longer exists.", severity="warning")
+        except psutil.AccessDenied:
+            self.notify(f"Access denied — cannot signal PID {pid}.", severity="error")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
+
+    # ── Event handlers ───────────────────────────────────
+
+    @on(Input.Changed, "#search-input")
+    def search_changed(self, event: Input.Changed) -> None:
+        self.filter_text = event.value
+        self._update_table()
+        self._update_status_bar()
+
+    @on(DataTable.HeaderSelected)
+    def header_clicked(self, event: DataTable.HeaderSelected) -> None:
+        col_key = str(event.column_key.value)
+        if col_key == self.sort_key:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_key = col_key
+            self.sort_reverse = True
+        self._update_table()
+
+    @on(DataTable.RowSelected)
+    def row_selected(self, event: DataTable.RowSelected) -> None:
+        try:
+            self._selected_pid = int(str(event.row_key.value))
+        except Exception:
+            self._selected_pid = None
+
+
+# ─────────────────────────────────────────────────────────
+#  Entry point
+# ─────────────────────────────────────────────────────────
+def main() -> None:
+    if sys.platform == "win32":
+        # Enable ANSI color codes on Windows
+        import os
+        os.system("")
+
+    app = HTopWin()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
