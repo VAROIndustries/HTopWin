@@ -24,7 +24,7 @@ import psutil
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Container, Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import ModalScreen
@@ -675,24 +675,32 @@ class BarWidget(Static):
 
 
 class CpuBarsPanel(Widget):
-    """Panel showing one bar per CPU core."""
+    """Panel showing one bar per CPU core, arranged in 2 columns."""
 
     DEFAULT_CSS = """
     CpuBarsPanel {
         height: auto;
+        width: auto;
         padding: 0;
+    }
+    .cpu-col {
+        height: auto;
+        width: auto;
+        padding-right: 2;
     }
     """
 
     def compose(self) -> ComposeResult:
         cpu_count = psutil.cpu_count(logical=True) or 1
-        yield Static("[bold #00d4ff]  CPU[/bold #00d4ff]", classes="section-title")
-        for i in range(cpu_count):
-            yield BarWidget(
-                label=f" {i+1:>2}",
-                pct=0.0,
-                id=f"cpu-bar-{i}",
-            )
+        half = (cpu_count + 1) // 2
+        yield Static("[bold #00d4ff]CPU[/bold #00d4ff]", classes="section-title")
+        with Horizontal():
+            with Vertical(classes="cpu-col"):
+                for i in range(half):
+                    yield BarWidget(label=f"{i+1:>2}", pct=0.0, id=f"cpu-bar-{i}")
+            with Vertical(classes="cpu-col"):
+                for i in range(half, cpu_count):
+                    yield BarWidget(label=f"{i+1:>2}", pct=0.0, id=f"cpu-bar-{i}")
 
     def refresh_stats(self, per_cpu: list[float]) -> None:
         for i, pct in enumerate(per_cpu):
@@ -1166,6 +1174,17 @@ def collect_processes() -> list[dict]:
     return procs
 
 
+def _collect_local_data():
+    """Collect all local system data in one call (runs in a background thread)."""
+    procs = collect_processes()
+    per_cpu = psutil.cpu_percent(percpu=True)
+    if isinstance(per_cpu, float):
+        per_cpu = [per_cpu]
+    mem = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+    return procs, per_cpu, mem, swap
+
+
 # ─────────────────────────────────────────────────────────
 #  Main App
 # ─────────────────────────────────────────────────────────
@@ -1244,6 +1263,7 @@ class HTopWin(App):
         self._remote_monitor = None   # RemoteMonitor instance when connected
         self._remote_info = None      # Last RemoteSystemInfo
         self._server_store = None     # ServerStore instance (loaded lazily)
+        self._displayed_pids: list[str] = []  # tracks current table row order
 
     # ── Layout ──────────────────────────────────────────
 
@@ -1288,68 +1308,50 @@ class HTopWin(App):
     # ── Refresh ──────────────────────────────────────────
 
     def _do_refresh(self) -> None:
-        """Collect data and update all widgets.
+        """Kick off a background worker to collect data without blocking the UI."""
+        self.run_worker(self._async_refresh, exclusive=True, thread=False)
 
-        When a remote monitor is active the refresh is handed to a background
-        worker so SSH I/O does not block the UI event loop.
-        """
+    async def _async_refresh(self) -> None:
+        """Collect all data off the main thread, then update widgets."""
         if self._remote_monitor and self._remote_monitor.connected:
-            self.run_worker(self._async_remote_refresh, exclusive=True)
-            return
-        # ── Local path ───────────────────────────────────────────────────────
-        self._processes = collect_processes()
-        self._update_top_panel()
+            # ── Remote path ──────────────────────────────────────────────
+            try:
+                info = await asyncio.to_thread(self._remote_monitor.collect)
+            except Exception as exc:
+                self.notify(f"Remote collect error: {exc}", severity="error")
+                self._remote_monitor = None
+                await self._collect_and_update_local()
+                return
+
+            self._remote_info = info
+            if info.error:
+                self.notify(f"Remote error: {info.error}", severity="error")
+                self._remote_monitor = None
+                await self._collect_and_update_local()
+            else:
+                self._update_top_panel_remote(info)
+                self._update_sysinfo_remote(info)
+                self._processes = info.processes
+                self._update_table()
+                self._update_status_bar()
+        else:
+            await self._collect_and_update_local()
+
+    async def _collect_and_update_local(self) -> None:
+        """Collect local system data in a thread, then update all widgets."""
+        procs, per_cpu, mem, swap = await asyncio.to_thread(_collect_local_data)
+        self._processes = procs
+        self._update_top_panel_with(per_cpu, mem, swap)
         self._update_sysinfo()
         self._update_table()
         self._update_status_bar()
 
-    async def _async_remote_refresh(self) -> None:
-        """Worker: collect remote stats without blocking the event loop."""
-        if self._remote_monitor is None or not self._remote_monitor.connected:
-            return
-        try:
-            info = await asyncio.to_thread(self._remote_monitor.collect)
-        except Exception as exc:
-            self.notify(f"Remote collect error: {exc}", severity="error")
-            self._remote_monitor = None
-            # Fall back to local
-            self._processes = collect_processes()
-            self._update_top_panel()
-            self._update_sysinfo()
-            self._update_table()
-            self._update_status_bar()
-            return
-
-        self._remote_info = info
-        if info.error:
-            self.notify(f"Remote error: {info.error}", severity="error")
-            self._remote_monitor = None
-            # Fall back to local
-            self._processes = collect_processes()
-            self._update_top_panel()
-            self._update_sysinfo()
-            self._update_table()
-            self._update_status_bar()
-        else:
-            self._update_top_panel_remote(info)
-            self._update_sysinfo_remote(info)
-            self._processes = info.processes
-            self._update_table()
-            self._update_status_bar()
-
-    def _update_top_panel(self) -> None:
-        per_cpu = psutil.cpu_percent(percpu=True)
-        if isinstance(per_cpu, float):
-            per_cpu = [per_cpu]
-
+    def _update_top_panel_with(self, per_cpu: list[float], mem, swap) -> None:
         try:
             cpu_panel = self.query_one("#cpu-panel", CpuBarsPanel)
             cpu_panel.refresh_stats(per_cpu)
         except NoMatches:
             pass
-
-        mem = psutil.virtual_memory()
-        swap = psutil.swap_memory()
         try:
             mem_panel = self.query_one("#mem-panel", MemBarsPanel)
             mem_panel.refresh_stats(mem, swap)
@@ -1441,10 +1443,7 @@ class HTopWin(App):
         except NoMatches:
             pass
 
-    def _update_table(self) -> None:
-        table: DataTable = self.query_one("#process-table", DataTable)
-
-        # Sort
+    def _sorted_filtered_procs(self) -> list[dict]:
         try:
             procs = sorted(
                 self._processes,
@@ -1453,9 +1452,7 @@ class HTopWin(App):
                 reverse=self.sort_reverse,
             )
         except Exception:
-            procs = self._processes
-
-        # Filter
+            procs = list(self._processes)
         ft = self.filter_text.lower()
         if ft:
             procs = [
@@ -1465,45 +1462,58 @@ class HTopWin(App):
                 or ft in str(p.get("cmdline_str", "")).lower()
                 or ft in str(p.get("pid", ""))
             ]
+        return procs
 
-        # Remember cursor position
-        try:
-            cursor_row = table.cursor_row
-        except Exception:
-            cursor_row = 0
+    @staticmethod
+    def _make_row(proc: dict) -> tuple:
+        cpu = proc.get("cpu_percent", 0.0)
+        mem = proc.get("memory_percent", 0.0)
+        return (
+            str(proc.get("pid", 0)),
+            str(proc.get("name", ""))[:20],
+            str(proc.get("username", "N/A"))[:14],
+            colorize_cpu(cpu),
+            colorize_mem(mem),
+            str(proc.get("num_threads", 0)),
+            colorize_status(str(proc.get("status", ""))),
+            str(proc.get("cmdline_str", ""))[:120],
+        )
 
-        table.clear()
+    def _update_table(self, force_rebuild: bool = False) -> None:
+        table: DataTable = self.query_one("#process-table", DataTable)
+        procs = self._sorted_filtered_procs()
+        new_pids = [str(p.get("pid", 0)) for p in procs]
 
-        for proc in procs:
-            pid = proc.get("pid", 0)
-            name = str(proc.get("name", ""))[:20]
-            user = str(proc.get("username", "N/A"))[:14]
-            cpu = proc.get("cpu_percent", 0.0)
-            mem = proc.get("memory_percent", 0.0)
-            threads = str(proc.get("num_threads", 0))
-            status = str(proc.get("status", ""))
-            cmd = str(proc.get("cmdline_str", ""))[:120]
-
-            row = (
-                str(pid),
-                name,
-                user,
-                colorize_cpu(cpu),
-                colorize_mem(mem),
-                threads,
-                colorize_status(status),
-                cmd,
-            )
-            table.add_row(*row, key=str(pid))
-
-        # Restore cursor
-        row_count = table.row_count
-        if row_count > 0:
-            safe_row = min(cursor_row, row_count - 1)
+        if force_rebuild or new_pids != self._displayed_pids:
+            # ── Full rebuild (order changed or forced) ──────────────────
             try:
-                table.move_cursor(row=safe_row)
+                cursor_key = str(
+                    table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+                )
             except Exception:
-                pass
+                cursor_key = None
+
+            table.clear()
+            for proc in procs:
+                table.add_row(*self._make_row(proc), key=str(proc.get("pid", 0)))
+            self._displayed_pids = new_pids
+
+            if cursor_key and cursor_key in new_pids:
+                try:
+                    table.move_cursor(row=new_pids.index(cursor_key))
+                except Exception:
+                    pass
+        else:
+            # ── Incremental update — only touch cells that change ───────
+            for proc in procs:
+                pid_str = str(proc.get("pid", 0))
+                try:
+                    table.update_cell(pid_str, "cpu_percent",    colorize_cpu(proc.get("cpu_percent", 0.0)),    update_width=False)
+                    table.update_cell(pid_str, "memory_percent", colorize_mem(proc.get("memory_percent", 0.0)), update_width=False)
+                    table.update_cell(pid_str, "status",         colorize_status(str(proc.get("status", ""))),  update_width=False)
+                    table.update_cell(pid_str, "num_threads",    str(proc.get("num_threads", 0)),               update_width=False)
+                except Exception:
+                    pass
 
         # Update sort label
         sort_dir = "▼" if self.sort_reverse else "▲"
@@ -1602,7 +1612,7 @@ class HTopWin(App):
                 else:
                     self.sort_key = key
                     self.sort_reverse = True
-                self._update_table()
+                self._update_table(force_rebuild=True)
 
         self.push_screen(SortMenuScreen(), handle_result)
 
@@ -1747,7 +1757,7 @@ class HTopWin(App):
     @on(Input.Changed, "#search-input")
     def search_changed(self, event: Input.Changed) -> None:
         self.filter_text = event.value
-        self._update_table()
+        self._update_table(force_rebuild=True)
         self._update_status_bar()
 
     @on(DataTable.HeaderSelected)
@@ -1758,7 +1768,7 @@ class HTopWin(App):
         else:
             self.sort_key = col_key
             self.sort_reverse = True
-        self._update_table()
+        self._update_table(force_rebuild=True)
 
     @on(DataTable.RowSelected)
     def row_selected(self, event: DataTable.RowSelected) -> None:
