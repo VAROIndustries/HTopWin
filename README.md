@@ -1,132 +1,194 @@
-# HTopWin — htop for Windows
+# HTopWin
 
-A terminal-based process manager for Windows, inspired by [htop](https://htop.dev/). Built with [Textual](https://textual.textualize.io/) and [psutil](https://psutil.readthedocs.io/).
+> **htop for Windows** — a rich, interactive terminal process manager with remote SSH monitoring.
 
-![HTopWin Screenshot](screenshot.png)
+Built with [Textual](https://textual.textualize.io/) and [psutil](https://psutil.readthedocs.io/). Runs natively on Windows 10/11, and also works on Linux and macOS.
+
+---
 
 ## Features
 
-- **Per-core CPU bars** with smooth Unicode block-character fill (▏▎▍▌▋▊▉█)
+### Local monitoring
+- **Per-core CPU bars** using smooth Unicode block characters (▏▎▍▌▋▊▉█)
 - **Memory & Swap bars** with used/total display
-- **Process table** with columns: PID, Name, User, CPU%, MEM%, Threads, Status, Command
-- **Sortable columns** — click any header or press F6 for a sort menu
-- **Real-time search/filter** — press `/` or F3 to filter by name, user, PID, or command
-- **Kill processes** — press `k` to confirm-kill or `F9` to send a specific signal
-- **Color-coded bars and values** — green < 50%, yellow 50–80%, red > 80%
-- **System info strip** — uptime, CPU core/thread count, current frequency
-- **Auto-refresh** every 2 seconds
-- **Windows-friendly** — gracefully handles access-denied processes; uses `kill()`/`terminate()` on Windows
+- **Process table** — PID, Name, User, CPU%, MEM%, Threads, Status, Command
+- **Sortable columns** — click any header or use the F6 sort menu
+- **Live search/filter** — press `/` or F3 to filter by name, user, PID, or command
+- **Kill & signal** — `k` for quick SIGKILL, F9 for a full signal menu
+- **Color-coded values** — green < 50%, yellow 50–80%, red > 80%
+- **System info strip** — uptime, CPU cores/threads, clock frequency, load averages
+- **Auto-refresh** every 2 seconds (F5 to force)
+
+### Remote SSH monitoring
+- Connect to any Linux/Unix server via SSH
+- Collects live CPU-per-core, memory, swap, load averages, and full process list from the remote host
+- Seamlessly switches all panels and the process table to remote data
+- Press F4 to disconnect and return to local monitoring
+
+### Encrypted server manager
+- Store unlimited SSH server profiles locally
+- Credentials encrypted with **Fernet / AES-128-CBC**
+- Key derived from your master password via **PBKDF2-HMAC-SHA256 (600 000 iterations)**
+- Supports both password auth and SSH private key auth
+- Nothing is ever stored in plain text
+
+---
 
 ## Requirements
 
-- Python 3.8+
-- Windows 10/11 (also works on Linux/macOS)
+- **Python 3.8+**
+- Windows 10/11 (also runs on Linux and macOS)
+
+---
 
 ## Installation
 
 ```bash
-# 1. Clone or download the project
+# 1. Clone the repo
+git clone https://github.com/VAROIndustries/HTopWin.git
 cd HTopWin
 
 # 2. Create a virtual environment (recommended)
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # Linux/macOS
+
+# Windows
+.venv\Scripts\activate
+
+# Linux / macOS
+source .venv/bin/activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Run
+# 4. Launch
 python htopwin.py
 ```
 
-## Keyboard Shortcuts
+> **Tip:** Run as Administrator (Windows) or with `sudo` (Linux) to see all processes without access-denied gaps.
 
-| Key         | Action                          |
-|-------------|---------------------------------|
-| `q` / F10   | Quit                            |
-| `k`         | Kill selected process (SIGKILL) |
-| F9          | Send signal menu                |
-| F5          | Force refresh now               |
-| F6          | Open sort menu                  |
-| F3 or `/`   | Toggle search/filter bar        |
-| `Escape`    | Close search / dismiss dialogs  |
-| `↑` / `↓`  | Navigate process list           |
-| Click header| Sort by that column             |
+---
 
-## Column Reference
+## Remote Monitoring Setup
 
-| Column   | Description                                |
-|----------|--------------------------------------------|
-| PID      | Process ID                                 |
-| Name     | Process executable name                    |
-| User     | Owner username                             |
-| CPU%     | CPU usage percentage                       |
-| MEM%     | Memory usage percentage                    |
-| Threads  | Number of threads                          |
-| Status   | running / sleeping / stopped / zombie …   |
-| Command  | Full command line                          |
-
-## Color Coding
-
-| Color  | Meaning           |
-|--------|-------------------|
-| Green  | < 50% usage       |
-| Yellow | 50–80% usage      |
-| Red    | > 80% usage       |
-
-## Remote Monitoring
-
-HTopWin can monitor remote Linux servers over SSH. Credentials are stored
-encrypted on your local machine — nothing is sent or stored in plain text.
-
-### Quick start
-
-1. Press **F2** to open the Server Manager.
-2. The first time you open it you will be prompted to set a **master password**.
-   Remember this password — if you lose it, delete `~/.htopwin/servers.enc`
-   and create a new store.
-3. Press **a** (or click "Add") to add a server:
-   - **Name** — a short label (e.g. `web-prod`)
-   - **Host** — IP address or hostname
-   - **Port** — SSH port (default `22`)
-   - **Username** — SSH username (e.g. `root` or `ubuntu`)
-   - **Auth type** — `password` or `key`
-   - **Password** — leave blank when using a key
-   - **Key path** — path to your private key, e.g. `~/.ssh/id_rsa`
-4. Select the server in the list and press **Enter** or click **Connect**.
-5. HTopWin switches to remote mode: CPU bars, memory bars, sysinfo strip,
-   and the process table all reflect the remote host.
-6. Press **F4** to disconnect and return to local monitoring.
-
-### Credential storage
-
-| File | Contents |
-|------|----------|
-| `~/.htopwin/servers.salt` | 16-byte random salt (created once) |
-| `~/.htopwin/servers.enc`  | Fernet-encrypted JSON server list |
-
-The encryption key is derived from your master password with
-PBKDF2-HMAC-SHA256 (600 000 iterations).  Delete `servers.enc` to reset
-the store completely.
-
-### Additional dependencies
-
-Remote monitoring requires two extra packages:
+Remote monitoring requires two additional packages:
 
 ```bash
 pip install paramiko cryptography
 ```
 
-If these are not installed, HTopWin still works normally for local monitoring
-and will show an error notification if you attempt to open the Server Manager.
+These are already listed in `requirements.txt` — a plain `pip install -r requirements.txt` installs everything.
 
-## Notes
+### Connecting to a remote server
 
-- Some system processes may show `N/A` for username or 0 for handles due to Windows access restrictions.
-- On Windows, F9 signal menu only exposes SIGTERM (graceful) and SIGKILL (force), since the full POSIX signal set is not available.
-- Run as Administrator to see all processes and their details without access-denied errors.
+1. Press **F2** to open the Server Manager.
+2. On first launch you will be asked to **create a master password**. This password encrypts your server list — keep it safe. If you forget it, delete `~/.htopwin/servers.enc` and start fresh.
+3. Press **`a`** or click **Add** to register a server:
+
+   | Field | Description |
+   |---|---|
+   | Name | Short label, e.g. `web-prod` |
+   | Host | IP address or hostname |
+   | Port | SSH port (default `22`) |
+   | Username | SSH login user, e.g. `ubuntu` |
+   | Auth type | `password` or `key` |
+   | Password | SSH password (leave blank when using a key) |
+   | Key path | Path to private key, e.g. `~/.ssh/id_rsa` |
+
+4. Select the server and press **Enter** (or click **Connect**).
+5. All panels — CPU bars, memory bars, sysinfo strip, and process table — switch to the remote host.
+6. Press **F4** to disconnect and return to local view.
+
+### Where credentials are stored
+
+| Path | Contents |
+|---|---|
+| `~/.htopwin/servers.salt` | 16-byte random salt (written once on first use) |
+| `~/.htopwin/servers.enc` | Fernet-encrypted JSON blob containing all server profiles |
+
+---
+
+## Keyboard Shortcuts
+
+| Key | Action |
+|---|---|
+| `q` / F10 | Quit |
+| F2 | Open Server Manager (remote SSH) |
+| F3 / `/` | Toggle search / filter bar |
+| F4 | Disconnect remote, return to local |
+| F5 | Force immediate refresh |
+| F6 | Sort menu |
+| F9 | Send signal to selected process |
+| `k` | Kill selected process (SIGKILL, with confirmation) |
+| `↑` / `↓` | Navigate process list |
+| Click header | Sort by that column (click again to reverse) |
+| Escape | Close dialogs / clear search |
+
+---
+
+## Column Reference
+
+| Column | Description |
+|---|---|
+| PID | Process ID |
+| Name | Executable name |
+| User | Owner username |
+| CPU% | CPU usage (color-coded) |
+| MEM% | Memory usage (color-coded) |
+| Threads | Thread count |
+| Status | running / sleeping / stopped / zombie … |
+| Command | Full command line |
+
+---
+
+## Color Guide
+
+| Color | Threshold |
+|---|---|
+| Green | < 50% |
+| Yellow | 50 – 80% |
+| Red | > 80% |
+
+Applies to CPU%, MEM%, and the CPU/memory bars.
+
+---
+
+## Platform Notes
+
+**Windows**
+- The F9 signal menu exposes only SIGTERM (graceful) and SIGKILL (force) — the full POSIX signal set is not available on Windows.
+- Some system processes show `N/A` for username due to OS access restrictions. Run as Administrator to minimise this.
+
+**Linux / macOS**
+- Full POSIX signal menu (SIGHUP, SIGINT, SIGQUIT, SIGKILL, SIGTERM, SIGSTOP, SIGCONT).
+- Load averages shown in the sysinfo strip.
+- Remote monitoring reads `/proc` directly, so the target server must be Linux.
+
+---
+
+## Project Structure
+
+```
+HTopWin/
+├── htopwin.py          # Main TUI application
+├── server_manager.py   # Encrypted SSH credential store
+├── remote_monitor.py   # SSH-based remote data collector
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---|---|
+| [textual](https://github.com/Textualize/textual) | TUI framework |
+| [psutil](https://github.com/giampaolo/psutil) | Local system & process info |
+| [paramiko](https://www.paramiko.org/) | SSH client for remote monitoring |
+| [cryptography](https://cryptography.io/) | Fernet encryption for credential storage |
+
+---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
