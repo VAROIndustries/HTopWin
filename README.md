@@ -75,6 +75,52 @@ python htopwin.py
 | Yellow | 50–80% usage      |
 | Red    | > 80% usage       |
 
+## Remote Monitoring
+
+HTopWin can monitor remote Linux servers over SSH. Credentials are stored
+encrypted on your local machine — nothing is sent or stored in plain text.
+
+### Quick start
+
+1. Press **F2** to open the Server Manager.
+2. The first time you open it you will be prompted to set a **master password**.
+   Remember this password — if you lose it, delete `~/.htopwin/servers.enc`
+   and create a new store.
+3. Press **a** (or click "Add") to add a server:
+   - **Name** — a short label (e.g. `web-prod`)
+   - **Host** — IP address or hostname
+   - **Port** — SSH port (default `22`)
+   - **Username** — SSH username (e.g. `root` or `ubuntu`)
+   - **Auth type** — `password` or `key`
+   - **Password** — leave blank when using a key
+   - **Key path** — path to your private key, e.g. `~/.ssh/id_rsa`
+4. Select the server in the list and press **Enter** or click **Connect**.
+5. HTopWin switches to remote mode: CPU bars, memory bars, sysinfo strip,
+   and the process table all reflect the remote host.
+6. Press **F4** to disconnect and return to local monitoring.
+
+### Credential storage
+
+| File | Contents |
+|------|----------|
+| `~/.htopwin/servers.salt` | 16-byte random salt (created once) |
+| `~/.htopwin/servers.enc`  | Fernet-encrypted JSON server list |
+
+The encryption key is derived from your master password with
+PBKDF2-HMAC-SHA256 (600 000 iterations).  Delete `servers.enc` to reset
+the store completely.
+
+### Additional dependencies
+
+Remote monitoring requires two extra packages:
+
+```bash
+pip install paramiko cryptography
+```
+
+If these are not installed, HTopWin still works normally for local monitoring
+and will show an error notification if you attempt to open the Server Manager.
+
 ## Notes
 
 - Some system processes may show `N/A` for username or 0 for handles due to Windows access restrictions.

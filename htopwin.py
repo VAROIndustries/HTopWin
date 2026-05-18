@@ -5,11 +5,14 @@ A terminal-based process manager for Windows built with Textual and psutil.
 
 from __future__ import annotations
 
+import asyncio
 import platform
 import signal
 import sys
 from datetime import timedelta
-from typing import ClassVar
+from typing import ClassVar, Optional
+
+# remote imports — handled lazily so the app works without them if not installed
 
 import psutil
 from textual import on
@@ -363,6 +366,103 @@ ScrollableContainer > .scrollbar {
 ScrollableContainer > .scrollbar--slider {
     background: #304880;
 }
+
+/* ── Server Manager ── */
+#server-manager-dialog {
+    width: 70;
+    height: 30;
+    background: #16213e;
+    border: solid #0f3460;
+    padding: 1 2;
+}
+#server-manager-dialog .dialog-title {
+    color: #00d4ff;
+    text-style: bold;
+    text-align: center;
+    width: 100%;
+    margin-bottom: 1;
+}
+#server-list {
+    height: 15;
+    background: #0d1b2a;
+    border: solid #1a3a5a;
+}
+#server-buttons {
+    layout: horizontal;
+    height: auto;
+    margin-top: 1;
+}
+#server-buttons Button {
+    margin: 0 1;
+}
+
+/* ── Add Server Form ── */
+#add-server-dialog {
+    width: 60;
+    height: auto;
+    background: #16213e;
+    border: solid #0f3460;
+    padding: 1 2;
+}
+#add-server-dialog .dialog-title {
+    color: #00d4ff;
+    text-style: bold;
+    text-align: center;
+    width: 100%;
+    margin-bottom: 1;
+}
+.form-row {
+    height: 3;
+    layout: horizontal;
+    margin-bottom: 1;
+}
+.form-label {
+    width: 14;
+    color: #a0c0ff;
+    padding-top: 1;
+}
+.form-input {
+    width: 1fr;
+    background: #0d1b2a;
+    color: #e0e0e0;
+    border: solid #1a3a5a;
+}
+.form-input:focus {
+    border: solid #00d4ff;
+}
+#form-buttons {
+    layout: horizontal;
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+#form-buttons Button {
+    margin: 0 1;
+}
+
+/* ── Master Password ── */
+#master-pw-dialog {
+    width: 50;
+    height: auto;
+    background: #16213e;
+    border: solid #0f3460;
+    padding: 1 2;
+}
+#master-pw-dialog .dialog-title {
+    color: #ffcc00;
+    text-style: bold;
+    text-align: center;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+/* ── Remote status ── */
+.remote-badge {
+    color: #00ff88;
+    text-style: bold;
+    width: auto;
+    padding: 0 2;
+}
 """
 
 # ─────────────────────────────────────────────────────────
@@ -649,6 +749,227 @@ class SortMenuScreen(ModalScreen[str | None]):
 
 
 # ─────────────────────────────────────────────────────────
+#  Remote / Server Manager Screens
+# ─────────────────────────────────────────────────────────
+
+class MasterPasswordScreen(ModalScreen):
+    """Prompt for master password to unlock server store."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, prompt_text: str = "Enter master password:", **kwargs):
+        super().__init__(**kwargs)
+        self._prompt_text = prompt_text
+
+    def compose(self) -> ComposeResult:
+        with Container(id="master-pw-dialog"):
+            yield Label("[bold yellow]  Server Store[/bold yellow]", classes="dialog-title")
+            yield Label(self._prompt_text, classes="dialog-info")
+            yield Input(password=True, placeholder="master password...", id="master-pw-input")
+            with Horizontal(id="kill-buttons"):
+                yield Button("  Unlock", id="btn-unlock", classes="safe")
+                yield Button("  Cancel", id="btn-cancel", classes="danger")
+
+    def on_mount(self) -> None:
+        self.query_one("#master-pw-input", Input).focus()
+
+    @on(Button.Pressed, "#btn-unlock")
+    def do_unlock(self) -> None:
+        pw = self.query_one("#master-pw-input", Input).value
+        self.dismiss(pw if pw else None)
+
+    @on(Button.Pressed, "#btn-cancel")
+    def do_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Input.Submitted, "#master-pw-input")
+    def input_submitted(self, event: Input.Submitted) -> None:
+        pw = event.value
+        self.dismiss(pw if pw else None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class AddServerScreen(ModalScreen):
+    """Form to add or edit a server entry."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, existing: dict | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self._existing = existing or {}
+
+    def compose(self) -> ComposeResult:
+        with Container(id="add-server-dialog"):
+            title = "Edit Server" if self._existing else "Add Server"
+            yield Label(f"[bold #00d4ff]{title}[/bold #00d4ff]", classes="dialog-title")
+            with Horizontal(classes="form-row"):
+                yield Label("Name:", classes="form-label")
+                yield Input(value=self._existing.get("name", ""), placeholder="my-server", id="f-name", classes="form-input")
+            with Horizontal(classes="form-row"):
+                yield Label("Host:", classes="form-label")
+                yield Input(value=self._existing.get("host", ""), placeholder="192.168.1.1 or hostname", id="f-host", classes="form-input")
+            with Horizontal(classes="form-row"):
+                yield Label("Port:", classes="form-label")
+                yield Input(value=str(self._existing.get("port", 22)), placeholder="22", id="f-port", classes="form-input")
+            with Horizontal(classes="form-row"):
+                yield Label("Username:", classes="form-label")
+                yield Input(value=self._existing.get("username", ""), placeholder="root", id="f-user", classes="form-input")
+            with Horizontal(classes="form-row"):
+                yield Label("Auth type:", classes="form-label")
+                yield Input(value=self._existing.get("auth_type", "password"), placeholder="password or key", id="f-auth", classes="form-input")
+            with Horizontal(classes="form-row"):
+                yield Label("Password:", classes="form-label")
+                yield Input(value=self._existing.get("password", ""), password=True, placeholder="(leave blank if using key)", id="f-pass", classes="form-input")
+            with Horizontal(classes="form-row"):
+                yield Label("Key path:", classes="form-label")
+                yield Input(value=self._existing.get("key_path", ""), placeholder="~/.ssh/id_rsa (optional)", id="f-key", classes="form-input")
+            with Horizontal(id="form-buttons"):
+                yield Button("  Save", id="btn-save", classes="safe")
+                yield Button("  Cancel", id="btn-cancel", classes="danger")
+
+    def on_mount(self) -> None:
+        self.query_one("#f-name", Input).focus()
+
+    @on(Button.Pressed, "#btn-save")
+    def do_save(self) -> None:
+        name      = self.query_one("#f-name", Input).value.strip()
+        host      = self.query_one("#f-host", Input).value.strip()
+        port_str  = self.query_one("#f-port", Input).value.strip()
+        username  = self.query_one("#f-user", Input).value.strip()
+        auth_type = self.query_one("#f-auth", Input).value.strip() or "password"
+        password  = self.query_one("#f-pass", Input).value
+        key_path  = self.query_one("#f-key", Input).value.strip()
+
+        if not name or not host or not username:
+            self.notify("Name, Host, and Username are required.", severity="error")
+            return
+        try:
+            port = int(port_str) if port_str else 22
+        except ValueError:
+            self.notify("Port must be a number.", severity="error")
+            return
+
+        server = {
+            "name":      name,
+            "host":      host,
+            "port":      port,
+            "username":  username,
+            "auth_type": auth_type,
+            "password":  password,
+            "key_path":  key_path,
+        }
+        self.dismiss(server)
+
+    @on(Button.Pressed, "#btn-cancel")
+    def do_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ServerManagerScreen(ModalScreen):
+    """Server list — select a server to connect, or manage servers."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close"),
+        Binding("a", "add_server", "Add"),
+        Binding("d", "delete_server", "Delete"),
+        Binding("enter", "connect_selected", "Connect"),
+    ]
+
+    def __init__(self, store, **kwargs):
+        super().__init__(**kwargs)
+        self._store = store  # ServerStore instance
+
+    def compose(self) -> ComposeResult:
+        with Container(id="server-manager-dialog"):
+            yield Label("[bold #00d4ff]  Server Manager[/bold #00d4ff]", classes="dialog-title")
+            yield ListView(id="server-list")
+            with Horizontal(id="server-buttons"):
+                yield Button("  Connect", id="btn-connect", classes="safe")
+                yield Button("  Add (a)", id="btn-add",     classes="safe")
+                yield Button("  Delete (d)", id="btn-delete", classes="danger")
+                yield Button("  Close",   id="btn-close",   classes="safe")
+
+    def on_mount(self) -> None:
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        lv = self.query_one("#server-list", ListView)
+        lv.clear()
+        servers = self._store.list_servers()
+        if not servers:
+            lv.append(ListItem(Label("[dim]No servers configured. Press 'a' to add one.[/dim]"), id="no-servers"))
+        else:
+            for s in servers:
+                auth = s.get("auth_type", "password")
+                host = s.get("host", "")
+                port = s.get("port", 22)
+                user = s.get("username", "")
+                lv.append(ListItem(
+                    Label(
+                        f"[bold white]{s['name']}[/bold white]  "
+                        f"[dim]{user}@{host}:{port}[/dim]  "
+                        f"[#6080a0]{auth}[/#6080a0]"
+                    ),
+                    id=f"srv-{s['name']}",
+                ))
+
+    def _get_selected_server_name(self) -> str | None:
+        lv = self.query_one("#server-list", ListView)
+        if lv.highlighted_child and lv.highlighted_child.id:
+            item_id = lv.highlighted_child.id
+            if item_id.startswith("srv-"):
+                return item_id[4:]
+        return None
+
+    @on(Button.Pressed, "#btn-connect")
+    def action_connect_selected(self) -> None:
+        name = self._get_selected_server_name()
+        if not name:
+            self.notify("Select a server first.", severity="warning")
+            return
+        server = self._store.get_server(name)
+        self.dismiss(server)
+
+    @on(ListView.Selected)
+    def list_item_selected(self, event: ListView.Selected) -> None:
+        if event.item.id and event.item.id.startswith("srv-"):
+            name = event.item.id[4:]
+            server = self._store.get_server(name)
+            self.dismiss(server)
+
+    @on(Button.Pressed, "#btn-add")
+    def action_add_server(self) -> None:
+        def handle(server: dict | None) -> None:
+            if server:
+                try:
+                    self._store.add_server(server)
+                    self.notify(f"Server '{server['name']}' saved.", severity="information")
+                    self._refresh_list()
+                except ValueError as e:
+                    self.notify(str(e), severity="error")
+        self.app.push_screen(AddServerScreen(), handle)
+
+    @on(Button.Pressed, "#btn-delete")
+    def action_delete_server(self) -> None:
+        name = self._get_selected_server_name()
+        if not name:
+            self.notify("Select a server to delete.", severity="warning")
+            return
+        self._store.remove_server(name)
+        self.notify(f"Server '{name}' deleted.", severity="information")
+        self._refresh_list()
+
+    @on(Button.Pressed, "#btn-close")
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+# ─────────────────────────────────────────────────────────
 #  Process data collection
 # ─────────────────────────────────────────────────────────
 PROC_ATTRS = [
@@ -727,6 +1048,8 @@ class HTopWin(App):
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("q", "quit", "Quit", show=True),
         Binding("f10", "quit", "Quit", show=False),
+        Binding("f2", "server_manager", "Servers", show=True),
+        Binding("f4", "disconnect_remote", "Disconnect", show=False),
         Binding("k", "kill_process", "Kill", show=True),
         Binding("f9", "signal_menu", "Signal", show=True),
         Binding("f5", "refresh_now", "Refresh", show=True),
@@ -750,6 +1073,9 @@ class HTopWin(App):
         self._selected_pid: int | None = None
         self._refresh_timer = None
         self._col_keys: list[str] = []
+        self._remote_monitor = None   # RemoteMonitor instance when connected
+        self._remote_info = None      # Last RemoteSystemInfo
+        self._server_store = None     # ServerStore instance (loaded lazily)
 
     # ── Layout ──────────────────────────────────────────
 
@@ -794,12 +1120,54 @@ class HTopWin(App):
     # ── Refresh ──────────────────────────────────────────
 
     def _do_refresh(self) -> None:
-        """Collect data and update all widgets."""
+        """Collect data and update all widgets.
+
+        When a remote monitor is active the refresh is handed to a background
+        worker so SSH I/O does not block the UI event loop.
+        """
+        if self._remote_monitor and self._remote_monitor.connected:
+            self.run_worker(self._async_remote_refresh, exclusive=True)
+            return
+        # ── Local path ───────────────────────────────────────────────────────
         self._processes = collect_processes()
         self._update_top_panel()
         self._update_sysinfo()
         self._update_table()
         self._update_status_bar()
+
+    async def _async_remote_refresh(self) -> None:
+        """Worker: collect remote stats without blocking the event loop."""
+        if self._remote_monitor is None or not self._remote_monitor.connected:
+            return
+        try:
+            info = await asyncio.to_thread(self._remote_monitor.collect)
+        except Exception as exc:
+            self.notify(f"Remote collect error: {exc}", severity="error")
+            self._remote_monitor = None
+            # Fall back to local
+            self._processes = collect_processes()
+            self._update_top_panel()
+            self._update_sysinfo()
+            self._update_table()
+            self._update_status_bar()
+            return
+
+        self._remote_info = info
+        if info.error:
+            self.notify(f"Remote error: {info.error}", severity="error")
+            self._remote_monitor = None
+            # Fall back to local
+            self._processes = collect_processes()
+            self._update_top_panel()
+            self._update_sysinfo()
+            self._update_table()
+            self._update_status_bar()
+        else:
+            self._update_top_panel_remote(info)
+            self._update_sysinfo_remote(info)
+            self._processes = info.processes
+            self._update_table()
+            self._update_status_bar()
 
     def _update_top_panel(self) -> None:
         per_cpu = psutil.cpu_percent(percpu=True)
@@ -817,6 +1185,51 @@ class HTopWin(App):
         try:
             mem_panel = self.query_one("#mem-panel", MemBarsPanel)
             mem_panel.refresh_stats(mem, swap)
+        except NoMatches:
+            pass
+
+    def _update_top_panel_remote(self, info) -> None:
+        """Update CPU and memory bars from a RemoteSystemInfo object."""
+        try:
+            cpu_panel = self.query_one("#cpu-panel", CpuBarsPanel)
+            cpu_panel.refresh_stats(info.cpu_percents)
+        except NoMatches:
+            pass
+
+        try:
+            mem_bar = self.query_one("#mem-bar", BarWidget)
+            used_str  = format_bytes(info.mem_used)
+            total_str = format_bytes(info.mem_total)
+            mem_bar.update_bar(info.mem_percent, f"{used_str}/{total_str}")
+        except NoMatches:
+            pass
+        try:
+            swp_bar = self.query_one("#swp-bar", BarWidget)
+            if info.swap_total > 0:
+                used_str  = format_bytes(info.swap_used)
+                total_str = format_bytes(info.swap_total)
+                swp_bar.update_bar(info.swap_percent, f"{used_str}/{total_str}")
+            else:
+                swp_bar.update_bar(0.0, "N/A")
+        except NoMatches:
+            pass
+
+    def _update_sysinfo_remote(self, info) -> None:
+        """Update the sysinfo strip with remote host data."""
+        uptime_str = format_uptime(info.uptime_seconds)
+        load       = info.load_avg
+        load_str   = f"{load[0]:.2f} {load[1]:.2f} {load[2]:.2f}"
+        cpu_count  = len(info.cpu_percents)
+
+        parts = [
+            f"[bold #00ff88]REMOTE:[/bold #00ff88] [white]{info.hostname}[/white]",
+            f"[bold #00d4ff]Uptime:[/bold #00d4ff] [white]{uptime_str}[/white]",
+            f"[bold #00d4ff]CPUs:[/bold #00d4ff] [white]{cpu_count}[/white]",
+            f"[bold #00d4ff]Load:[/bold #00d4ff] [white]{load_str}[/white]",
+        ]
+        try:
+            sysinfo = self.query_one("#sysinfo-bar", Static)
+            sysinfo.update("   " + "  |  ".join(parts))
         except NoMatches:
             pass
 
@@ -934,13 +1347,19 @@ class HTopWin(App):
             pass
 
     def _update_status_bar(self) -> None:
-        total = len(self._processes)
-        running = sum(1 for p in self._processes if p.get("status") == "running")
+        total    = len(self._processes)
+        running  = sum(1 for p in self._processes if p.get("status") == "running")
         sleeping = sum(1 for p in self._processes if p.get("status") in ("sleeping", "idle"))
-        zombie = sum(1 for p in self._processes if p.get("status") == "zombie")
+        zombie   = sum(1 for p in self._processes if p.get("status") == "zombie")
 
         ft = self.filter_text
         filter_info = f"  [bold #ffaa00]Filter:[/bold #ffaa00] [white]{ft}[/white]" if ft else ""
+
+        # Remote badge
+        remote_badge = ""
+        if self._remote_monitor and self._remote_monitor.connected and self._remote_info:
+            hostname = self._remote_info.hostname or "remote"
+            remote_badge = f"  [bold #00ff88][ REMOTE: {hostname} ][/bold #00ff88]"
 
         msg = (
             f"  [bold #00d4ff]Tasks:[/bold #00d4ff] [white]{total}[/white]"
@@ -950,6 +1369,7 @@ class HTopWin(App):
         if zombie:
             msg += f"  [bold #ff4444]Zombie:[/bold #ff4444] [white]{zombie}[/white]"
         msg += filter_info
+        msg += remote_badge
 
         try:
             bar = self.query_one("#status-bar", Static)
@@ -1017,6 +1437,92 @@ class HTopWin(App):
                 self._update_table()
 
         self.push_screen(SortMenuScreen(), handle_result)
+
+    def action_server_manager(self) -> None:
+        """Open the server manager (F2).  Prompts for master password first."""
+        def handle_password(password: str | None) -> None:
+            if password is None:
+                return
+            try:
+                from server_manager import ServerStore
+            except ImportError:
+                self.notify(
+                    "Install cryptography: pip install cryptography",
+                    severity="error",
+                )
+                return
+            try:
+                store = ServerStore(password)
+            except ValueError as e:
+                self.notify(str(e), severity="error")
+                return
+            except Exception as e:
+                self.notify(f"Could not open store: {e}", severity="error")
+                return
+
+            self._server_store = store
+
+            def handle_server(server: dict | None) -> None:
+                if server:
+                    self._connect_to_server(server)
+
+            self.push_screen(ServerManagerScreen(store), handle_server)
+
+        self.push_screen(MasterPasswordScreen(), handle_password)
+
+    def _connect_to_server(self, server: dict) -> None:
+        """Connect to *server* via SSH and start remote monitoring."""
+        try:
+            from remote_monitor import RemoteMonitor
+        except ImportError:
+            self.notify(
+                "Install paramiko and cryptography: pip install paramiko cryptography",
+                severity="error",
+            )
+            return
+
+        # Disconnect any previous session
+        if self._remote_monitor is not None:
+            try:
+                self._remote_monitor.disconnect()
+            except Exception:
+                pass
+            self._remote_monitor = None
+            self._remote_info    = None
+
+        name = server.get("name", server.get("host", "server"))
+        self.notify(f"Connecting to {name}...", severity="information")
+
+        monitor = RemoteMonitor(server)
+        try:
+            monitor.connect()
+        except ImportError:
+            self.notify(
+                "Install paramiko: pip install paramiko",
+                severity="error",
+            )
+            return
+        except Exception as exc:
+            self.notify(f"SSH connection failed: {exc}", severity="error")
+            return
+
+        self._remote_monitor = monitor
+        self.notify(f"Connected to {name}.", severity="information")
+        self._do_refresh()
+
+    def action_disconnect_remote(self) -> None:
+        """Disconnect from remote host and return to local monitoring (F4)."""
+        if self._remote_monitor is None:
+            self.notify("Not connected to a remote host.", severity="warning")
+            return
+        try:
+            self._remote_monitor.disconnect()
+        except Exception:
+            pass
+        self._remote_monitor = None
+        self._remote_info    = None
+        self.notify("Disconnected — showing local system.", severity="information")
+        self._do_refresh()
 
     def action_toggle_search(self) -> None:
         self.search_visible = not self.search_visible
