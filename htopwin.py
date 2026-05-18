@@ -6,11 +6,17 @@ A terminal-based process manager for Windows built with Textual and psutil.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import platform
 import signal
 import sys
 from datetime import timedelta
 from typing import ClassVar, Optional
+
+try:
+    import winreg  # Windows only
+except ImportError:
+    winreg = None  # type: ignore[assignment]
 
 # remote imports — handled lazily so the app works without them if not installed
 
@@ -36,6 +42,66 @@ from textual.widgets import (
 )
 
 IS_WINDOWS = platform.system() == "Windows"
+
+
+# ─────────────────────────────────────────────────────────
+#  Admin / Startup helpers
+# ─────────────────────────────────────────────────────────
+
+def _is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+STARTUP_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+STARTUP_APP_NAME = "HTopWin"
+
+
+def _is_in_startup() -> bool:
+    if not IS_WINDOWS:
+        return False
+    try:
+        import winreg as _winreg
+        key = _winreg.OpenKey(_winreg.HKEY_CURRENT_USER, STARTUP_REG_KEY, 0, _winreg.KEY_READ)
+        _winreg.QueryValueEx(key, STARTUP_APP_NAME)
+        _winreg.CloseKey(key)
+        return True
+    except Exception:
+        return False
+
+
+def _set_startup(enable: bool) -> None:
+    if not IS_WINDOWS:
+        return
+    try:
+        import winreg as _winreg
+        key = _winreg.OpenKey(_winreg.HKEY_CURRENT_USER, STARTUP_REG_KEY, 0, _winreg.KEY_SET_VALUE)
+        if enable:
+            exe = sys.executable if not getattr(sys, 'frozen', False) else sys.executable
+            script = sys.argv[0] if not getattr(sys, 'frozen', False) else ""
+            value = f'"{exe}" "{script}"' if script else f'"{exe}"'
+            _winreg.SetValueEx(key, STARTUP_APP_NAME, 0, _winreg.REG_SZ, value)
+        else:
+            try:
+                _winreg.DeleteValue(key, STARTUP_APP_NAME)
+            except FileNotFoundError:
+                pass
+        _winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
+def _restart_as_admin() -> None:
+    """Re-launch the current process with admin privileges."""
+    if not IS_WINDOWS:
+        return
+    exe = sys.executable
+    script = sys.argv[0] if not getattr(sys, 'frozen', False) else ""
+    params = f'"{script}"' if script else ""
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+
 
 # ─────────────────────────────────────────────────────────
 #  Inline CSS
@@ -463,6 +529,53 @@ ScrollableContainer > .scrollbar--slider {
     width: auto;
     padding: 0 2;
 }
+
+/* ── Settings screen ── */
+#settings-dialog {
+    width: 60;
+    height: auto;
+    background: #16213e;
+    border: solid #0f3460;
+    padding: 1 2;
+}
+#settings-dialog .dialog-title {
+    color: #00d4ff;
+    text-style: bold;
+    text-align: center;
+    width: 100%;
+    margin-bottom: 1;
+}
+.settings-row {
+    height: 3;
+    layout: horizontal;
+    margin-bottom: 1;
+}
+.settings-label {
+    width: 30;
+    color: #a0c0ff;
+    padding-top: 1;
+}
+.settings-value {
+    width: 1fr;
+    color: #e0e0e0;
+    padding-top: 1;
+}
+#settings-buttons {
+    layout: horizontal;
+    height: auto;
+    margin-top: 1;
+    align: center middle;
+}
+#settings-buttons Button {
+    margin: 0 1;
+}
+.admin-badge {
+    color: #ffcc00;
+    text-style: bold;
+}
+.not-admin-badge {
+    color: #ff6666;
+}
 """
 
 # ─────────────────────────────────────────────────────────
@@ -661,23 +774,17 @@ class KillConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
-SIGNALS = [
-    (signal.SIGTERM, "SIGTERM (15) - Graceful terminate"),
-    (signal.SIGKILL, "SIGKILL (9)  - Force kill"),
-]
-
 if IS_WINDOWS:
-    # Windows doesn't have all POSIX signals; only expose what works
     SIGNALS = [
         (signal.SIGTERM, "SIGTERM (15) - Graceful terminate"),
-        (signal.SIGKILL, "SIGKILL (9)  - Force kill"),
+        (9,              "SIGKILL (9)  - Force kill"),
     ]
 else:
     SIGNALS = [
         (signal.SIGHUP,  "SIGHUP  (1)  - Hangup"),
         (signal.SIGINT,  "SIGINT  (2)  - Interrupt"),
         (signal.SIGQUIT, "SIGQUIT (3)  - Quit"),
-        (signal.SIGKILL, "SIGKILL (9)  - Force kill"),
+        (9,              "SIGKILL (9)  - Force kill"),
         (signal.SIGTERM, "SIGTERM (15) - Graceful terminate"),
         (signal.SIGSTOP, "SIGSTOP (19) - Stop"),
         (signal.SIGCONT, "SIGCONT (18) - Continue"),
@@ -702,7 +809,7 @@ class SignalMenuScreen(ModalScreen[int | None]):
                 f"[bold yellow]  Send Signal[/bold yellow]\n[dim]{self._name} (PID {self._pid})[/dim]",
                 classes="dialog-title",
             )
-            items = [ListItem(Label(desc), id=f"sig-{sig.value}") for sig, desc in SIGNALS]
+            items = [ListItem(Label(desc), id=f"sig-{int(sig)}") for sig, desc in SIGNALS]
             yield ListView(*items, id="signal-list")
 
     @on(ListView.Selected)
@@ -969,6 +1076,66 @@ class ServerManagerScreen(ModalScreen):
         self.dismiss(None)
 
 
+class SettingsScreen(ModalScreen[None]):
+    """App settings: admin mode, startup, refresh interval."""
+
+    BINDINGS = [Binding("escape", "cancel", "Close")]
+
+    def compose(self) -> ComposeResult:
+        is_admin = _is_admin()
+        in_startup = _is_in_startup()
+        admin_text = "[bold #ffcc00]YES (elevated)[/bold #ffcc00]" if is_admin else "[#ff6666]NO[/#ff6666]"
+        startup_text = "[bold #00ff88]Enabled[/bold #00ff88]" if in_startup else "[dim]Disabled[/dim]"
+
+        with Container(id="settings-dialog"):
+            yield Label("[bold #00d4ff]  Settings[/bold #00d4ff]", classes="dialog-title")
+
+            with Horizontal(classes="settings-row"):
+                yield Label("Running as Administrator:", classes="settings-label")
+                yield Label(admin_text, classes="settings-value", id="admin-status")
+
+            with Horizontal(classes="settings-row"):
+                yield Label("Run at Windows startup:", classes="settings-label")
+                yield Label(startup_text, classes="settings-value", id="startup-status")
+
+            with Horizontal(id="settings-buttons"):
+                if not is_admin and IS_WINDOWS:
+                    yield Button("  Restart as Admin", id="btn-restart-admin", classes="safe")
+                if IS_WINDOWS:
+                    label = "  Disable Startup" if in_startup else "  Enable Startup"
+                    yield Button(label, id="btn-toggle-startup", classes="safe")
+                yield Button("  Close", id="btn-close", classes="safe")
+
+    @on(Button.Pressed, "#btn-restart-admin")
+    def do_restart_admin(self) -> None:
+        self.app.notify("Relaunching with elevated privileges…", severity="information")
+        _restart_as_admin()
+        self.app.exit()
+
+    @on(Button.Pressed, "#btn-toggle-startup")
+    def do_toggle_startup(self) -> None:
+        current = _is_in_startup()
+        _set_startup(not current)
+        new_state = not current
+        status = self.query_one("#startup-status", Label)
+        if new_state:
+            status.update("[bold #00ff88]Enabled[/bold #00ff88]")
+            self.app.notify("HTopWin will launch at Windows startup.", severity="information")
+        else:
+            status.update("[dim]Disabled[/dim]")
+            self.app.notify("Removed from Windows startup.", severity="information")
+        # Relabel button
+        try:
+            btn = self.query_one("#btn-toggle-startup", Button)
+            btn.label = "  Disable Startup" if new_state else "  Enable Startup"
+        except Exception:
+            pass
+
+    @on(Button.Pressed, "#btn-close")
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 # ─────────────────────────────────────────────────────────
 #  Process data collection
 # ─────────────────────────────────────────────────────────
@@ -1054,6 +1221,7 @@ class HTopWin(App):
         Binding("f9", "signal_menu", "Signal", show=True),
         Binding("f5", "refresh_now", "Refresh", show=True),
         Binding("f6", "sort_menu", "Sort", show=True),
+        Binding("f8", "settings", "Settings", show=True),
         Binding("f3", "toggle_search", "Search", show=True),
         Binding("/", "toggle_search", "Search", show=False),
         Binding("escape", "clear_search", "Clear", show=False),
@@ -1409,7 +1577,7 @@ class HTopWin(App):
 
         def handle_result(confirmed: bool | None) -> None:
             if confirmed:
-                self._send_signal_to_pid(pid, signal.SIGKILL)
+                self._send_signal_to_pid(pid, 9)
 
         self.push_screen(KillConfirmScreen(pid, name), handle_result)
 
@@ -1524,6 +1692,9 @@ class HTopWin(App):
         self.notify("Disconnected — showing local system.", severity="information")
         self._do_refresh()
 
+    def action_settings(self) -> None:
+        self.push_screen(SettingsScreen())
+
     def action_toggle_search(self) -> None:
         self.search_visible = not self.search_visible
         search_input = self.query_one("#search-input", Input)
@@ -1556,7 +1727,7 @@ class HTopWin(App):
         try:
             proc = psutil.Process(pid)
             if IS_WINDOWS:
-                if sig == signal.SIGKILL or sig == 9:
+                if sig == 9:
                     proc.kill()
                 else:
                     proc.terminate()

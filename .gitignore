@@ -30,6 +30,11 @@ MANIFEST
 # PyInstaller
 *.manifest
 *.spec
+!htopwin.spec
+*.spec.bak
+
+# Installer output
+installer_output/
 
 # Installer logs
 pip-log.txt

@@ -1,3 +1,33 @@
+## Session: 2026-05-17 (task batch 2)
+
+### Prompts
+- Fix signal.SIGKILL Windows crash, add Settings screen, create PyInstaller build files and Inno Setup installer
+
+### Commands Run
+- Read all project files
+- Edited htopwin.py: fixed SIGKILL crash, added Settings screen + helpers
+- Created htopwin.spec (PyInstaller spec)
+- Created build.py (build helper script)
+- Created installer.iss (Inno Setup installer script)
+- Updated .gitignore (added !htopwin.spec, *.spec.bak, installer_output/)
+- python build.py — built dist/HTopWin/HTopWin.exe (8.1 MB)
+- git add + commit + push
+
+### Work Done
+- Fixed `signal.SIGKILL` Windows crash: removed top-level SIGNALS list that referenced `signal.SIGKILL` before the if/else guard; replaced with clean if/else using integer `9` for SIGKILL in both branches; fixed `sig.value` -> `int(sig)` in SignalMenuScreen; fixed `signal.SIGKILL` reference in `action_kill_process` and `_send_signal_to_pid`
+- Added Settings screen: `_is_admin()`, `_is_in_startup()`, `_set_startup()`, `_restart_as_admin()` helpers; `SettingsScreen` modal with admin status, startup toggle, restart-as-admin button; F8 binding in HTopWin
+- Created `htopwin.spec` — PyInstaller spec with full textual/rich/psutil/cryptography/paramiko hidden imports
+- Created `build.py` — cleans build/dist, runs PyInstaller, reports EXE size
+- Created `installer.iss` — Inno Setup 6 script with desktop icon, startup task options
+- Build: dist/HTopWin/HTopWin.exe, 8.1 MB
+
+### Next Steps
+- Run installer.iss through Inno Setup compiler to produce HTopWin-Setup-v1.0.0.exe
+- Optional: add `--interval` CLI argument for custom refresh rate
+- Optional: add process tree view toggle
+- Optional: add network I/O and disk I/O columns
+- Optional: test remote mode against a real Linux host
+
 ## Session: 2026-05-18
 
 ### Prompts
