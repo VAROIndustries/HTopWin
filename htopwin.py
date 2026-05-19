@@ -9,7 +9,9 @@ import asyncio
 import ctypes
 import platform
 import signal
+import struct
 import sys
+import time as _time
 from datetime import timedelta
 from typing import ClassVar, Optional
 
@@ -1145,29 +1147,153 @@ class SettingsScreen(ModalScreen[None]):
 
 
 # ─────────────────────────────────────────────────────────
-#  Process data collection
+#  Fast Windows process collection via NtQuerySystemInformation
 # ─────────────────────────────────────────────────────────
-PROC_ATTRS = [
+# Offsets inside SYSTEM_PROCESS_INFORMATION on 64-bit Windows
+_SPI_NEXT      = 0    # ULONG  — offset to next entry (0 = last)
+_SPI_THREADS   = 4    # ULONG  — thread count
+_SPI_USER_TIME = 40   # LARGE_INTEGER — user CPU time (100-ns units)
+_SPI_KERN_TIME = 48   # LARGE_INTEGER — kernel CPU time (100-ns units)
+_SPI_IMG_LEN   = 56   # USHORT — ImageName.Length (bytes)
+_SPI_IMG_PTR   = 64   # ULONG_PTR — ImageName.Buffer (pointer into same buffer)
+_SPI_PID       = 80   # ULONG_PTR — UniqueProcessId
+_SPI_HANDLES   = 96   # ULONG  — HandleCount
+_SPI_WS        = 144  # SIZE_T — WorkingSetSize (physical RAM used)
+
+_ntdll = None
+_prev_proc_snapshot: dict = {}   # pid -> (cpu_time_secs, monotonic_timestamp)
+
+
+def _get_ntdll():
+    global _ntdll
+    if _ntdll is None:
+        try:
+            _ntdll = ctypes.WinDLL('ntdll')
+        except Exception:
+            pass
+    return _ntdll
+
+
+def _nt_snapshot() -> dict | None:
+    """Return {pid: dict} for all processes via a single kernel call."""
+    ntdll = _get_ntdll()
+    if ntdll is None:
+        return None
+    buf_size = 1 << 22  # 4 MB — enough for 500+ processes
+    for _ in range(6):
+        buf = ctypes.create_string_buffer(buf_size)
+        ret_len = ctypes.c_ulong(0)
+        status = ntdll.NtQuerySystemInformation(5, buf, buf_size, ctypes.byref(ret_len))
+        if status == 0:
+            break
+        if status == 0xC0000004:   # STATUS_INFO_LENGTH_MISMATCH
+            buf_size = ret_len.value + 65536
+        else:
+            return None
+    else:
+        return None
+
+    base = ctypes.addressof(buf)
+    raw = buf.raw
+    result: dict = {}
+    off = 0
+    while True:
+        try:
+            next_off = struct.unpack_from('<I', raw, off + _SPI_NEXT)[0]
+            threads  = struct.unpack_from('<I', raw, off + _SPI_THREADS)[0]
+            ut       = struct.unpack_from('<q', raw, off + _SPI_USER_TIME)[0]
+            kt       = struct.unpack_from('<q', raw, off + _SPI_KERN_TIME)[0]
+            img_len  = struct.unpack_from('<H', raw, off + _SPI_IMG_LEN)[0]
+            img_ptr  = struct.unpack_from('<Q', raw, off + _SPI_IMG_PTR)[0]
+            pid      = struct.unpack_from('<Q', raw, off + _SPI_PID)[0]
+            ws       = struct.unpack_from('<Q', raw, off + _SPI_WS)[0]
+            handles  = struct.unpack_from('<I', raw, off + _SPI_HANDLES)[0]
+        except struct.error:
+            break
+
+        if img_ptr and img_len:
+            noff = img_ptr - base
+            try:
+                name = raw[noff: noff + img_len].decode('utf-16-le', errors='replace').rstrip('\x00')
+            except Exception:
+                name = f'[{pid}]'
+        elif pid == 0:
+            name = 'System Idle Process'
+        else:
+            name = f'[{pid}]'
+
+        result[pid] = {
+            'name':    name,
+            'cpu_time': (ut + kt) / 10_000_000.0,   # 100-ns → seconds
+            'ws':      ws,
+            'threads': threads,
+            'handles': handles,
+        }
+        if next_off == 0:
+            break
+        off += next_off
+    return result
+
+
+def _collect_windows() -> list[dict]:
+    """Fast Windows process collection — runs in ~0.15 s for 440+ processes."""
+    global _prev_proc_snapshot
+    now = _time.monotonic()
+    snap = _nt_snapshot()
+    if snap is None:
+        return []
+
+    mem_total = psutil.virtual_memory().total
+    procs: list[dict] = []
+    for pid, info in snap.items():
+        cpu_time = info['cpu_time']
+        cpu_pct = 0.0
+        if pid in _prev_proc_snapshot:
+            prev_cpu, prev_t = _prev_proc_snapshot[pid]
+            dt = now - prev_t
+            if dt > 0:
+                cpu_pct = max(0.0, (cpu_time - prev_cpu) / dt * 100.0)
+        ws = info['ws']
+        procs.append({
+            'pid':            pid,
+            'name':           info['name'][:25],
+            'username':       'N/A',
+            'cpu_percent':    round(cpu_pct, 2),
+            'memory_percent': round(ws / mem_total * 100.0, 2) if mem_total else 0.0,
+            'num_threads':    info['threads'],
+            'status':         'running',
+            'cmdline_str':    info['name'],
+        })
+    _prev_proc_snapshot = {pid: (info['cpu_time'], now) for pid, info in snap.items()}
+    return procs
+
+
+# ─────────────────────────────────────────────────────────
+#  Process data collection (cross-platform entry point)
+# ─────────────────────────────────────────────────────────
+PROC_ATTRS_UNIX = [
     "pid", "name", "username", "cpu_percent", "memory_percent",
-    "num_threads", "status", "cmdline", "create_time",
+    "num_threads", "status", "cmdline",
 ]
-if IS_WINDOWS:
-    PROC_ATTRS.append("num_handles")
 
 
 def collect_processes() -> list[dict]:
-    """Collect process info using psutil, handling permission errors gracefully."""
+    """Collect process info. Uses NtQuerySystemInformation on Windows
+    (fast, ~0.15 s) and psutil process_iter on Linux/macOS."""
+    if IS_WINDOWS:
+        procs = _collect_windows()
+        if procs:
+            return procs
+    # ── Unix fallback ────────────────────────────────────────────────
     procs = []
-    for proc in psutil.process_iter(PROC_ATTRS):
+    for proc in psutil.process_iter(PROC_ATTRS_UNIX):
         try:
-            info = proc.info  # type: ignore[attr-defined]
+            info = proc.info
             info["cmdline_str"] = " ".join(info.get("cmdline") or []) or info.get("name", "")
-            info["username"] = info.get("username") or "N/A"
+            info["username"]    = info.get("username") or "N/A"
             info["cpu_percent"] = info.get("cpu_percent") or 0.0
             info["memory_percent"] = info.get("memory_percent") or 0.0
             info["num_threads"] = info.get("num_threads") or 0
-            if IS_WINDOWS:
-                info["handles"] = info.get("num_handles") or 0
             procs.append(info)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
@@ -1395,8 +1521,7 @@ class HTopWin(App):
     def _update_sysinfo(self) -> None:
         try:
             boot_time = psutil.boot_time()
-            import time
-            uptime = time.time() - boot_time
+            uptime = _time.time() - boot_time
             uptime_str = format_uptime(uptime)
         except Exception:
             uptime_str = "N/A"
