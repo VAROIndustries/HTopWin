@@ -34,6 +34,7 @@ hiddenimports += [
     'ctypes',
     'asyncio',
     '_cffi_backend',
+    'pynvml',
 ]
 
 a = Analysis(

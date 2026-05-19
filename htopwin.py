@@ -12,6 +12,7 @@ import signal
 import struct
 import sys
 import time as _time
+import warnings
 from datetime import timedelta
 from typing import ClassVar, Optional
 
@@ -124,6 +125,11 @@ Screen {
 }
 
 #top-panel > Horizontal {
+    height: auto;
+}
+
+#right-panel {
+    width: 1fr;
     height: auto;
 }
 
@@ -639,6 +645,69 @@ def format_uptime(seconds: float) -> str:
 
 
 # ─────────────────────────────────────────────────────────
+#  GPU helpers (NVIDIA via pynvml / nvidia-ml-py)
+# ─────────────────────────────────────────────────────────
+_nvml_init_done = False
+_nvml_ok = False
+
+
+def _init_nvml() -> bool:
+    global _nvml_init_done, _nvml_ok
+    if _nvml_init_done:
+        return _nvml_ok
+    _nvml_init_done = True
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import pynvml
+            pynvml.nvmlInit()
+        _nvml_ok = True
+    except Exception:
+        _nvml_ok = False
+    return _nvml_ok
+
+
+def _gpu_count() -> int:
+    if not _init_nvml():
+        return 0
+    try:
+        import pynvml
+        return pynvml.nvmlDeviceGetCount()
+    except Exception:
+        return 0
+
+
+def collect_gpu_data() -> list[dict]:
+    """Return a list of dicts with GPU stats (one per GPU). Fast — direct NVML calls."""
+    if not _init_nvml():
+        return []
+    try:
+        import pynvml
+        result = []
+        for i in range(pynvml.nvmlDeviceGetCount()):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            util = pynvml.nvmlDeviceGetUtilizationRates(h)
+            mem  = pynvml.nvmlDeviceGetMemoryInfo(h)
+            try:
+                temp = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+            except Exception:
+                temp = 0
+            mem_pct = mem.used / mem.total * 100.0 if mem.total else 0.0
+            result.append({
+                'index':    i,
+                'name':     pynvml.nvmlDeviceGetName(h),
+                'util_pct': float(util.gpu),
+                'mem_pct':  mem_pct,
+                'mem_used': format_bytes(mem.used),
+                'mem_total': format_bytes(mem.total),
+                'temp':     temp,
+            })
+        return result
+    except Exception:
+        return []
+
+
+# ─────────────────────────────────────────────────────────
 #  Widgets
 # ─────────────────────────────────────────────────────────
 class BarWidget(Static):
@@ -750,6 +819,44 @@ class MemBarsPanel(Widget):
                 swp_bar.update_bar(0.0, "N/A")
         except NoMatches:
             pass
+
+
+class GpuBarsPanel(Widget):
+    """Panel showing per-GPU utilization and VRAM bars."""
+
+    DEFAULT_CSS = """
+    GpuBarsPanel {
+        height: auto;
+        width: 1fr;
+        padding: 0;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        n = _gpu_count()
+        yield Static("[bold #00d4ff]  GPU[/bold #00d4ff]", classes="section-title")
+        if n == 0:
+            yield Static("[dim]  No GPU[/dim]")
+        else:
+            for i in range(n):
+                yield BarWidget(label=f" G{i} Use", pct=0.0, id=f"gpu-use-{i}")
+                yield BarWidget(label=f" G{i} Mem", pct=0.0, id=f"gpu-mem-{i}")
+
+    def refresh_stats(self, gpu_data: list[dict]) -> None:
+        for g in gpu_data:
+            i = g['index']
+            try:
+                self.query_one(f"#gpu-use-{i}", BarWidget).update_bar(
+                    g['util_pct'], f"{g['temp']}°C"
+                )
+            except NoMatches:
+                pass
+            try:
+                self.query_one(f"#gpu-mem-{i}", BarWidget).update_bar(
+                    g['mem_pct'], f"{g['mem_used']}/{g['mem_total']}"
+                )
+            except NoMatches:
+                pass
 
 
 # ─────────────────────────────────────────────────────────
@@ -1384,6 +1491,7 @@ class HTopWin(App):
         self._server_store = None     # ServerStore instance (loaded lazily)
         self._displayed_pids: list[str] = []  # tracks current table row order
         self._last_cpu_percents: list[float] = []  # last cpu_percent snapshot
+        self._last_gpu_data: list[dict] = []       # last GPU stats snapshot
 
     # ── Layout ──────────────────────────────────────────
 
@@ -1393,7 +1501,9 @@ class HTopWin(App):
         with Container(id="top-panel"):
             with Horizontal():
                 yield CpuBarsPanel(id="cpu-panel")
-                yield MemBarsPanel(id="mem-panel")
+                with Vertical(id="right-panel"):
+                    yield MemBarsPanel(id="mem-panel")
+                    yield GpuBarsPanel(id="gpu-panel")
 
         yield Static("", id="sysinfo-bar")
 
@@ -1428,11 +1538,11 @@ class HTopWin(App):
     # ── Refresh ──────────────────────────────────────────
 
     def _do_refresh(self) -> None:
-        """Sample cpu_percent on the main thread (non-blocking, needs stable
-        thread-local baseline), then hand the slow process iteration to a
-        background worker so the UI stays responsive."""
+        """Sample cpu_percent and GPU stats on the main thread (both non-blocking),
+        then hand slow process iteration to a background worker."""
         per_cpu = psutil.cpu_percent(percpu=True, interval=None)
         self._last_cpu_percents = per_cpu if isinstance(per_cpu, list) else [per_cpu]
+        self._last_gpu_data = collect_gpu_data()
         self.run_worker(self._async_refresh, exclusive=True)
 
     async def _async_refresh(self) -> None:
@@ -1459,6 +1569,7 @@ class HTopWin(App):
             swap = psutil.swap_memory()
             self._processes = procs
             self._update_top_panel_with(self._last_cpu_percents, mem, swap)
+            self._update_gpu_panel(self._last_gpu_data)
             self._update_sysinfo()
             self._update_table()
             self._update_status_bar()
@@ -1474,6 +1585,12 @@ class HTopWin(App):
         try:
             mem_panel = self.query_one("#mem-panel", MemBarsPanel)
             mem_panel.refresh_stats(mem, swap)
+        except NoMatches:
+            pass
+
+    def _update_gpu_panel(self, gpu_data: list[dict]) -> None:
+        try:
+            self.query_one("#gpu-panel", GpuBarsPanel).refresh_stats(gpu_data)
         except NoMatches:
             pass
 
