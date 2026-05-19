@@ -123,6 +123,10 @@ Screen {
     border-bottom: solid #0f3460;
 }
 
+#top-panel > Horizontal {
+    height: auto;
+}
+
 #cpu-section {
     height: auto;
     padding: 0;
