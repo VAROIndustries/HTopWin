@@ -1,5 +1,7 @@
 # HTopWin
 
+[![VARØ Industries](https://img.shields.io/badge/VAR%C3%98-Industries-c8883e?style=flat-square)](https://varo.industries)
+
 > **htop for Windows** — a rich, interactive terminal process manager with remote SSH monitoring.
 
 Built with [Textual](https://textual.textualize.io/) and [psutil](https://psutil.readthedocs.io/). Runs natively on Windows 10/11, and also works on Linux and macOS.
