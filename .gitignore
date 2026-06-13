@@ -81,3 +81,6 @@ $RECYCLE.BIN/
 
 # Logs
 *.log
+**/.claude/session_log.md
+**/.claude/settings.local.json
+*.pyc
