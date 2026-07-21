@@ -1,5 +1,8 @@
 # HTopWin
 
+**🌐 Tool page: [varo.industries/tools/htopwin](https://varo.industries/tools/htopwin)** — features, screenshots, install, and FAQ.
+
+
 [![VARØ Industries](https://img.shields.io/badge/VAR%C3%98-Industries-c8883e?style=flat-square)](https://varo.industries)
 
 > **htop for Windows** — a rich, interactive terminal process manager with remote SSH monitoring.
